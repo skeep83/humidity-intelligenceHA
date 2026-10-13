@@ -108,7 +108,13 @@ def test_zone_pressure_uses_distinct_room_and_house_values_to_select_zone1():
     _assert_mode(result, "cooking", "Zone 1", "Humidity delta")
     assert result.runtime_mode == "cooking"
     assert result.fan_service_calls == []
-    assert result.lower_lane_trace == ["_handle_alerts", "_handle_humidifiers", "_handle_zone_by_key:zone1"]
+    # Dynamic-zone arbitration evaluates every enabled zone each cycle.
+    assert result.lower_lane_trace == [
+        "_handle_alerts",
+        "_handle_humidifiers",
+        "_handle_zone_by_key:zone1",
+        "_handle_zone_by_key:zone2",
+    ]
     display = result.reason_sensor_attrs["display_reason"]
     assert display["family"] == "zone"
     assert display["headline"] == "Zone 1 response lane selected"

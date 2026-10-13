@@ -2016,8 +2016,9 @@ async def _run_runtime_assertions(engine_mod) -> None:
         for domain, service, data, _ in hass_label.services.calls
     )
 
-    # Zone lane priority must select one ventilation lane per cycle:
-    # zone1 beats zone2 and zone2 must not write its fan output.
+    # Dynamic-zone arbitration is per output: independent zones run at the
+    # same time. Kitchen (zone1) and bedroom (zone2) both write their own
+    # fan outputs in one cycle instead of zone1 suppressing zone2.
     entry_zone_select_data = _base_entry_data()
     entry_zone_select_data["alert_handling_enabled"] = False
     entry_zone_select_data["humidifiers"] = {}
@@ -2046,12 +2047,12 @@ async def _run_runtime_assertions(engine_mod) -> None:
         and data.get("percentage") == 66
         for domain, service, data, _ in hass_zone_select.services.calls
     )
-    assert not any(
+    assert any(
         domain == "fan"
         and service == "set_percentage"
         and data.get("entity_id") == "fan.zone2"
         for domain, service, data, _ in hass_zone_select.services.calls
-    )
+    ), "independent zone2 must run concurrently with zone1 under per-output arbitration"
 
     # AQ-only scenario: no alert and no zone should allow AQ lane execution.
     entry3_data = _base_entry_data()

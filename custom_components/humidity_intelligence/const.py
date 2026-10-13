@@ -150,6 +150,13 @@ TRIGGER_DEFS = {
         "default": 5,
         "unit": "%",
     },
+    "humidity_absolute_high": {
+        "label": "Humidity above absolute level",
+        "min": 35,
+        "max": 95,
+        "default": 60,
+        "unit": "%",
+    },
     "condensation_risk": {"label": "Condensation risk", "min": 2, "max": 6, "default": 4, "unit": "degC"},
     "mould_risk": {"label": "Mould risk", "min": 1, "max": 3, "default": 2, "unit": "level"},
     "air_quality_bad": {"label": "Air quality bad", "min": 50, "max": 90, "default": 70, "unit": "IAQ"},
@@ -163,6 +170,31 @@ ZONE_OUTPUT_LEVEL_DEFAULT = 66
 ZONE_OUTPUT_LEVEL_BOOST_DEFAULT = 100
 FAN_OUTPUT_LEVEL_AUTO = "auto"
 FAN_OUTPUT_LEVEL_STEPS = [33, 66, 100]
+
+# Airflow direction control (fork feature)
+AIRFLOW_MODE_OPTIONS = ["none", "supply", "exhaust"]
+# Optional safety re-assert for outputs whose firmware is known to revert
+# continuous direction back to alternating (OPUS/type 17 watchdog). Zone
+# airflow normally uses direction + speed level (no manual mode), so this is
+# a belt-and-braces refresh while a zone demand is active.
+AIRFLOW_REASSERT_SECONDS_DEFAULT = 60
+AIRFLOW_REASSERT_SECONDS_MIN = 30
+AIRFLOW_REASSERT_SECONDS_MAX = 300
+# Device types whose firmware reverts continuous direction (measured on
+# Blauberg Freshpoint OPUS: manual/continuous mode drops after 60-90 s).
+AIRFLOW_REASSERT_DEVICE_TYPES = {17}
+# Percentage tolerance when comparing desired vs reported fan speed. Siku
+# reports 32 for a 33% manual target (integer rounding), and an exact
+# comparison makes HI re-send commands on every evaluation (audible beeps).
+FAN_PERCENTAGE_TOLERANCE = 2
+
+# Absolute-humidity trigger hysteresis (fork feature). The trigger turns on
+# when the zone average stays at/above the configured threshold for ON_HOLD
+# minutes and clears when it stays at/below (threshold - hysteresis) for
+# OFF_HOLD minutes. Defaults; each is overridable per zone.
+HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS = 5.0
+HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES = 20
+HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES = 45
 
 # Trigger definitions for AQ automations
 AQ_TRIGGER_DEFS = {

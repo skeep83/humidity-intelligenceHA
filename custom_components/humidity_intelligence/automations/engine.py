@@ -15,6 +15,13 @@ from homeassistant.helpers.event import async_track_state_change_event, async_tr
 from homeassistant.util import dt as dt_util
 
 from ..helpers.air_quality import capture_configured_aq_evidence
+from ..helpers.airflow import (
+    AIRFLOW_EXTRACT,
+    AIRFLOW_NONE,
+    detect_device_type,
+    resolve_output_airflow,
+    zone_airflow_semantic,
+)
 from ..const import (
     ALERT_THRESHOLD_BOUNDS,
     ALERT_TRIGGER_DEFS,
@@ -23,10 +30,18 @@ from ..const import (
     ENGINE_INTERVAL_MAX,
     ENGINE_INTERVAL_MIN,
     ENGINE_INTERVAL_MINUTES_DEFAULT,
+    AIRFLOW_REASSERT_SECONDS_DEFAULT,
+    AIRFLOW_REASSERT_SECONDS_MAX,
+    AIRFLOW_REASSERT_SECONDS_MIN,
+    AIRFLOW_REASSERT_DEVICE_TYPES,
     FAN_OUTPUT_LEVEL_AUTO,
     FAN_OUTPUT_LEVEL_STEPS,
+    FAN_PERCENTAGE_TOLERANCE,
     CONF_ALERT_HANDLING_ENABLED,
     DEFAULT_ALERT_HANDLING_ENABLED,
+    HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS,
+    HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES,
+    HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES,
     HUMIDIFIER_RECOVERY_IN_BAND_DEFAULT,
     HUMIDIFIER_RECONCILE_CONFIRM_SECONDS,
     HUMIDIFIER_RECONCILE_HISTORY_LIMIT,
@@ -172,6 +187,18 @@ class HIAutomationEngine:
         self._humidifier_lane_demand: Dict[str, bool] = {}
         self._humidifier_output_records: Dict[str, Dict[str, Any]] = {}
         self._humidifier_retry_tasks: Dict[str, asyncio.Task] = {}
+        # Airflow (direction) hold state: entity_id -> wanted siku direction.
+        self._airflow_targets: Dict[str, str] = {}
+        self._airflow_reassert_unsub = None
+        reassert_seconds = self._cfg("airflow_reassert_seconds", AIRFLOW_REASSERT_SECONDS_DEFAULT)
+        self.airflow_reassert_seconds = _bounded_int(
+            reassert_seconds,
+            AIRFLOW_REASSERT_SECONDS_MIN,
+            AIRFLOW_REASSERT_SECONDS_MAX,
+            AIRFLOW_REASSERT_SECONDS_DEFAULT,
+        )
+        # Absolute-humidity hysteresis bookkeeping: zone_key -> {"on_since", "off_since", "active"}
+        self._absolute_humidity_state: Dict[str, Dict[str, Any]] = {}
         configured_interval = None
         if entry.options:
             configured_interval = entry.options.get("engine_interval_minutes")
@@ -219,6 +246,10 @@ class HIAutomationEngine:
             self._unsub()
         if self._periodic:
             self._periodic()
+        if self._airflow_reassert_unsub is not None:
+            self._airflow_reassert_unsub()
+            self._airflow_reassert_unsub = None
+        self._airflow_targets.clear()
         if self._startup_recheck_task and not self._startup_recheck_task.done():
             self._startup_recheck_task.cancel()
         self._startup_recheck_task = None
@@ -384,6 +415,40 @@ class HIAutomationEngine:
             if not gate_status.allowed:
                 await self._sync_visual_alert_tasks([])
                 action = self.time_gate.get("outside_action", "safe_state")
+                night_demands: List[Dict[str, Any]] = []
+                if gate_status.kind == "time":
+                    # Night soft-extraction bypass: zones explicitly flagged
+                    # night_bypass may run when their absolute-humidity
+                    # trigger is active, capped at the lowest fan step. When
+                    # telemetry goes stale the trigger stops matching and the
+                    # outputs fall back to auto (fail to the quiet side).
+                    night_demands = await self._collect_zone_demands(
+                        night_bypass_only=True
+                    )
+                if night_demands:
+                    winner_by_output = self._arbitrate_zone_demands(night_demands)
+                    capped: Dict[str, Dict[str, Any]] = {}
+                    for entity_id, demand in winner_by_output.items():
+                        capped_demand = dict(demand)
+                        capped_demand["run_level"] = FAN_OUTPUT_LEVEL_STEPS[0]
+                        capped[entity_id] = capped_demand
+                    await self._apply_zone_demands(list(capped.values()), capped)
+                    await self._set_zone_outputs_auto(exclude=list(capped.keys()))
+                    first = night_demands[0]
+                    await self._set_runtime_mode(
+                        "night_extract",
+                        self._zone_display_label(
+                            str(first.get("zone_key") or ""), "night_extract"
+                        ),
+                    )
+                    await self._set_runtime_reason(
+                        self._with_isolation_notice(
+                            "Time gate is outside its window; night soft extraction "
+                            "runs at the lowest fan level because absolute humidity "
+                            "is above the configured threshold."
+                        )
+                    )
+                    return
                 if action == "safe_state":
                     await self._return_to_normal()
                     await self._set_runtime_mode("global_gate", "GLOBAL GATE")
@@ -472,19 +537,18 @@ class HIAutomationEngine:
             # Humidifiers are independent from zone/AQ lane order.
             humidifier_details = await self._handle_humidifiers()
 
-            # Requested lane order: zone1 -> zone2 -> AQ. Only the selected
-            # ventilation lane may write fan outputs in a cycle.
-            zone1_active, zone1_mode, zone1_detail = await self._handle_zone_by_key("zone1")
-            zone2_active = False
-            zone2_mode = None
-            zone2_detail = None
-            if zone1_active:
-                await self._set_zone_outputs_auto(exclude=zone1_detail.get("outputs", []) if zone1_detail else [])
-            else:
-                zone2_active, zone2_mode, zone2_detail = await self._handle_zone_by_key("zone2")
-                if zone2_active:
-                    await self._set_zone_outputs_auto(exclude=zone2_detail.get("outputs", []) if zone2_detail else [])
-            zone_outputs_active = zone1_active or zone2_active
+            # Zone arbitration is per output, not per lane: every enabled zone
+            # evaluates demand, and for each output entity the demand with the
+            # best (priority, level) wins. Outputs nobody demands return to
+            # auto. This lets independent zones (kitchen vs bedrooms) run at
+            # the same time instead of zone1 suppressing zone2.
+            zone_demands = await self._collect_zone_demands()
+            winner_by_output = self._arbitrate_zone_demands(zone_demands)
+            active_zone_keys = sorted({d["zone_key"] for d in zone_demands})
+            zone_outputs_active = bool(winner_by_output)
+            await self._apply_zone_demands(zone_demands, winner_by_output)
+            if zone_outputs_active:
+                await self._set_zone_outputs_auto(exclude=list(winner_by_output.keys()))
 
             # AQ lane only runs when no alert or zone lane is active.
             aq_active = False
@@ -494,20 +558,34 @@ class HIAutomationEngine:
             else:
                 await self._deactivate_aq_activity(set_fan_auto=not zone_outputs_active)
 
-            if not (zone1_active or zone2_active):
+            if not zone_outputs_active:
                 await self._set_zone_outputs_auto(exclude=self._active_aq_outputs() if aq_active else None)
+
+            # Backward-compatible detail shape: the first (highest priority)
+            # active zone fills the legacy zone1 slot, the next one zone2.
+            zone_details_by_key = {
+                d["zone_key"]: d["detail"] for d in zone_demands
+            }
+            zone1_active = zone_outputs_active
+            zone1_mode = zone_demands[0]["mode"] if zone_demands else None
+            zone1_detail = zone_demands[0]["detail"] if zone_demands else None
+            zone2_active = False
+            zone2_mode = None
+            zone2_detail = None
+            if len(active_zone_keys) > 1:
+                second_key = active_zone_keys[1]
+                zone2_active = True
+                zone2_detail = zone_details_by_key.get(second_key)
+                zone2_mode = (zone2_detail or {}).get("mode")
 
             runtime_mode = "normal"
             runtime_display = "NORMAL"
             if alert_active:
                 runtime_mode = "alert"
                 runtime_display = "ALERT"
-            elif zone1_active:
-                runtime_mode = zone1_mode or "cooking"
-                runtime_display = self._zone_display_label("zone1", runtime_mode)
-            elif zone2_active:
-                runtime_mode = zone2_mode or "bathroom"
-                runtime_display = self._zone_display_label("zone2", runtime_mode)
+            elif zone_outputs_active and zone_demands:
+                runtime_mode = zone_demands[0]["mode"]
+                runtime_display = self._zone_display_label(zone_demands[0]["zone_key"], runtime_mode)
             elif aq_active:
                 runtime_mode = "air_quality"
                 runtime_display = "AIR QUALITY"
@@ -1125,45 +1203,210 @@ class HIAutomationEngine:
             if current is asyncio.current_task():
                 self._visual_alert_tasks.pop(identity, None)
 
-    async def _handle_zone_by_key(self, zone_key: str) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+    async def _handle_zone_by_key(self, zone_key: str) -> Optional[Dict[str, Any]]:
+        """Evaluate one zone into a demand (no output side effects).
+
+        Returns None when the zone is disabled or has no active trigger.
+        Applying demands happens in the per-output arbitrator so multiple
+        zones can run concurrently instead of zone1 suppressing zone2.
+        """
         zone = self.zones.get(zone_key, {})
         if not zone.get("enabled"):
-            return False, None, None
+            return None
 
         triggers = zone.get("triggers", [])
         level = zone.get("level")
         outputs = zone.get("outputs", [])
         if not triggers or not outputs:
-            return False, None, None
+            return None
 
         run_level, trigger_details, trigger_facts = self._zone_trigger_level(
             triggers,
             zone,
             level,
+            zone_key=zone_key,
         )
         if not run_level:
-            return False, None, None
+            return None
 
-        await self._set_fan_outputs_level(outputs, run_level)
         zone_mode = self._zone_mode_from_zone(zone_key, zone)
-        return (
-            True,
-            zone_mode,
-            {
+        return {
+            "zone_key": zone_key,
+            "priority": self._zone_priority_for(zone_key),
+            "mode": zone_mode,
+            "outputs": outputs,
+            "run_level": run_level,
+            "airflow": zone_airflow_semantic(zone),
+            "airflow_overrides": zone.get("airflow_overrides", {}) or {},
+            "night_bypass": bool(zone.get("night_bypass"))
+            and zone_airflow_semantic(zone) == AIRFLOW_EXTRACT,
+            "absolute_active": bool(trigger_facts)
+            and any(f.code == "humidity_absolute" for f in trigger_facts),
+            "detail": {
                 "zone_key": zone_key,
+                "mode": zone_mode,
                 "ui_label": self._zone_display_label(zone_key, zone_mode),
                 "outputs": outputs,
                 "output_level": run_level,
                 "triggers": trigger_details,
                 "trigger_facts": trigger_facts,
             },
+        }
+
+    def _ordered_zone_keys(self) -> List[str]:
+        """Zone keys in arbitration order: configured priority, then key."""
+        return sorted(
+            self.zones.keys(),
+            key=lambda key: (self._zone_priority_for(key), str(key)),
         )
+
+    def _zone_priority_for(self, zone_key: str) -> int:
+        zone = self.zones.get(zone_key, {}) if isinstance(self.zones, dict) else {}
+        configured = zone.get("priority")
+        if configured is not None:
+            return _bounded_int(configured, 1, 99, 50)
+        return _zone_priority(zone_key)
+
+    async def _collect_zone_demands(
+        self, *, night_bypass_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        demands: List[Dict[str, Any]] = []
+        for zone_key in self._ordered_zone_keys():
+            demand = await self._handle_zone_by_key(zone_key)
+            if demand is None:
+                continue
+            if night_bypass_only and not (
+                demand["night_bypass"] and demand["absolute_active"]
+            ):
+                continue
+            demands.append(demand)
+        return demands
+
+    def _arbitrate_zone_demands(
+        self, demands: List[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Per-output winner map: entity_id -> winning demand.
+
+        For an output claimed by several active zones the winner is the demand
+        with the lowest priority number; ties break on the stronger fan level,
+        then on zone order (already sorted). Deterministic and stable.
+        """
+        winners: Dict[str, Dict[str, Any]] = {}
+        for demand in demands:
+            for entity_id in demand["outputs"]:
+                entity_id = str(entity_id or "").strip()
+                if not entity_id:
+                    continue
+                current = winners.get(entity_id)
+                if current is None:
+                    winners[entity_id] = demand
+                    continue
+                if (demand["priority"], -_fan_level_rank(demand["run_level"])) < (
+                    current["priority"],
+                    -_fan_level_rank(current["run_level"]),
+                ):
+                    winners[entity_id] = demand
+        return winners
+
+    async def _apply_zone_demands(
+        self,
+        demands: List[Dict[str, Any]],
+        winner_by_output: Dict[str, Dict[str, Any]],
+    ) -> None:
+        active_targets: Dict[str, str] = {}
+        for entity_id, demand in winner_by_output.items():
+            await self._set_fan_outputs_level([entity_id], demand["run_level"])
+            airflow = demand.get("airflow") or AIRFLOW_NONE
+            if airflow != AIRFLOW_NONE and entity_id.startswith("fan."):
+                direction = await self._apply_output_direction(
+                    entity_id,
+                    airflow,
+                    demand.get("airflow_overrides") or {},
+                )
+                if direction:
+                    active_targets[entity_id] = direction
+        self._airflow_targets = active_targets
+        self._sync_airflow_reassert_timer()
+
+    async def _apply_output_direction(
+        self,
+        entity_id: str,
+        semantic: str,
+        overrides: Dict[str, Dict[str, Any]],
+    ) -> Optional[str]:
+        plan = resolve_output_airflow(self.hass, entity_id, semantic, overrides)
+        if plan.source == "unknown" or not plan.siku_direction:
+            _LOGGER.debug(
+                "HI airflow: direction suppressed for %s (%s)", entity_id, plan.reason
+            )
+            return None
+        state = self.hass.states.get(entity_id)
+        current = str((state.attributes.get("direction") if state else "") or "").lower()
+        if current == plan.siku_direction:
+            return plan.siku_direction
+        if not self.hass.services.has_service("fan", "set_direction"):
+            return None
+        try:
+            await self.hass.services.async_call(
+                "fan",
+                "set_direction",
+                {"entity_id": entity_id, "direction": plan.siku_direction},
+                blocking=False,
+            )
+        except Exception:
+            _LOGGER.exception("Failed to set airflow direction for %s", entity_id)
+            return None
+        return plan.siku_direction
+
+    def _sync_airflow_reassert_timer(self) -> None:
+        """Watchdog insurance for units that revert continuous direction.
+
+        Only entities whose device type is known to drop continuous airflow
+        (measured on OPUS/type 17) are re-asserted; VENTO-class units keep
+        direction on their own and must not be poked.
+        """
+        needs_timer = any(
+            detect_device_type(self.hass, entity_id) in AIRFLOW_REASSERT_DEVICE_TYPES
+            for entity_id in self._airflow_targets
+        )
+        if needs_timer and self._airflow_reassert_unsub is None:
+            self._airflow_reassert_unsub = async_track_time_interval(
+                self.hass,
+                self._airflow_reassert_tick,
+                timedelta(seconds=self.airflow_reassert_seconds),
+            )
+        elif not needs_timer and self._airflow_reassert_unsub is not None:
+            unsub = self._airflow_reassert_unsub
+            self._airflow_reassert_unsub = None
+            unsub()
+
+    async def _airflow_reassert_tick(self, _now) -> None:
+        targets = dict(self._airflow_targets)
+        for entity_id, wanted in targets.items():
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state in {"unavailable", "unknown"}:
+                continue
+            current = str(state.attributes.get("direction") or "").lower()
+            if current == wanted:
+                continue
+            if not self.hass.services.has_service("fan", "set_direction"):
+                continue
+            try:
+                await self.hass.services.async_call(
+                    "fan",
+                    "set_direction",
+                    {"entity_id": entity_id, "direction": wanted},
+                    blocking=False,
+                )
+            except Exception:
+                _LOGGER.exception("Airflow re-assert failed for %s", entity_id)
 
     def _zone_trigger_level(
         self,
         triggers: List[str],
         zone: Dict[str, Any],
         level: Optional[str],
+        zone_key: Optional[str] = None,
     ) -> Tuple[Optional[str], List[str], Tuple[_TriggerFact, ...]]:
         profile = self._active_target_profile()
         normal_level = _normalize_fan_level(
@@ -1181,7 +1424,25 @@ class HIAutomationEngine:
         trigger_facts: List[_TriggerFact] = []
         for trig in triggers:
             threshold = zone.get("thresholds", {}).get(trig)
-            if trig == "humidity_high":
+            if trig == "humidity_absolute_high":
+                matched, measured, threshold_val = self._evaluate_absolute_humidity(
+                    zone, threshold, zone_key=zone_key
+                )
+                if matched:
+                    selected_level = _max_fan_level(selected_level, normal_level)
+                    trigger_details.append(
+                        f"Room humidity {measured:.1f}% >= absolute threshold {threshold_val:g}% (held)"
+                    )
+                    trigger_facts.append(
+                        _TriggerFact(
+                            code="humidity_absolute",
+                            measured=round(measured, 1),
+                            threshold=threshold_val,
+                            unit="percentage",
+                            comparison="at_or_above",
+                        )
+                    )
+            elif trig == "humidity_high":
                 zone_rooms = zone.get("rooms", [])
                 room_avg = self._rooms_avg("humidity", zone_rooms)
                 house_avg = self._level_avg("humidity", None)
@@ -1263,6 +1524,74 @@ class HIAutomationEngine:
                         )
                     )
         return selected_level, trigger_details, tuple(trigger_facts)
+
+    def _evaluate_absolute_humidity(
+        self,
+        zone: Dict[str, Any],
+        threshold: Any,
+        zone_key: Optional[str] = None,
+    ) -> Tuple[bool, float, float]:
+        """Absolute-humidity trigger with on/off hold hysteresis.
+
+        Turns on when the zone room average stays at/above the threshold for
+        ``humidity_on_hold_minutes`` and clears when it stays at/below
+        (threshold - hysteresis) for ``humidity_off_hold_minutes``. While the
+        trigger is active, values between the two bands do not change state.
+        Returns (matched, measured, threshold).
+        """
+        threshold_val = _to_float(threshold)
+        zone_rooms = zone.get("rooms", [])
+        room_avg = self._rooms_avg("humidity", zone_rooms)
+        if threshold_val is None or room_avg is None:
+            return False, room_avg if room_avg is not None else 0.0, threshold_val or 0.0
+
+        hysteresis = _to_float(
+            zone.get("humidity_hysteresis", HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS)
+        )
+        if hysteresis is None or hysteresis < 0:
+            hysteresis = HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS
+        on_hold = _bounded_int(
+            zone.get("humidity_on_hold_minutes", HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES),
+            0,
+            240,
+            HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES,
+        )
+        off_hold = _bounded_int(
+            zone.get("humidity_off_hold_minutes", HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES),
+            0,
+            720,
+            HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES,
+        )
+        off_threshold = threshold_val - hysteresis
+
+        state_key = str(zone_key or zone.get("zone_key") or id(zone))
+        state = self._absolute_humidity_state.setdefault(
+            state_key, {"active": False, "on_since": None, "off_since": None}
+        )
+        now = dt_util.utcnow()
+
+        if room_avg >= threshold_val:
+            state["on_since"] = state["on_since"] or now
+            state["off_since"] = None
+            if not state["active"]:
+                elapsed = (now - state["on_since"]).total_seconds()
+                if elapsed >= on_hold * 60:
+                    state["active"] = True
+                    state["on_since"] = None
+        elif room_avg <= off_threshold:
+            state["off_since"] = state["off_since"] or now
+            state["on_since"] = None
+            if state["active"]:
+                elapsed = (now - state["off_since"]).total_seconds()
+                if elapsed >= off_hold * 60:
+                    state["active"] = False
+                    state["off_since"] = None
+        else:
+            # In the hysteresis band: freeze both timers, keep current state.
+            state["on_since"] = None
+            state["off_since"] = None
+
+        return bool(state["active"]), room_avg, threshold_val
 
     async def _handle_aq(self) -> Tuple[bool, List[Dict[str, Any]]]:
         active = False
@@ -2726,18 +3055,22 @@ class HIAutomationEngine:
         base_reason = ""
         if runtime_mode == "alert" and alert_labels:
             base_reason = self._format_alert_detail(alert_labels)
+        elif zone1_detail or zone2_detail:
+            # Dynamic zones: any number of active zone demands. Describe each
+            # active zone (highest priority first). This also covers the
+            # legacy cooking/bathroom modes for dynamic zone keys.
+            details = [d for d in (zone1_detail, zone2_detail) if d]
+            parts = [
+                self._format_zone_detail(
+                    d, str(d.get("ui_label") or d.get("zone_key") or "Zone")
+                )
+                for d in details
+            ]
+            base_reason = " ".join(parts)
         elif runtime_mode == "cooking":
-            if zone1_detail:
-                zone_label = zone1_detail.get("ui_label") or "Zone 1"
-                base_reason = self._format_zone_detail(zone1_detail, str(zone_label))
-            else:
-                base_reason = "Zone 1 extraction is active."
+            base_reason = "Zone 1 extraction is active."
         elif runtime_mode == "bathroom":
-            if zone2_detail:
-                zone_label = zone2_detail.get("ui_label") or "Zone 2"
-                base_reason = self._format_zone_detail(zone2_detail, str(zone_label))
-            else:
-                base_reason = "Zone 2 extraction is active."
+            base_reason = "Zone 2 extraction is active."
         elif runtime_mode == "air_quality" and aq_active:
             base_reason = self._format_aq_detail(aq_details)
         else:
@@ -4944,7 +5277,10 @@ async def _set_fan_percentage(
             current_pct = state.attributes.get("percentage") if state else None
             if state and state.state == "on" and current_pct is not None:
                 try:
-                    if int(current_pct) == int(pct):
+                    # Tolerant compare: siku reports 32 for a 33% manual
+                    # target (integer rounding); an exact compare made HI
+                    # re-send set_percentage on every evaluation (beeps).
+                    if abs(int(current_pct) - int(pct)) <= FAN_PERCENTAGE_TOLERANCE:
                         continue
                 except (TypeError, ValueError):
                     pass
