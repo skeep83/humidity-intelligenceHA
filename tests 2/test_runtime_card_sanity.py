@@ -7073,8 +7073,14 @@ def test_generated_v1_cards_escape_dynamic_html_text():
 
 def test_release_check_rejects_unsupported_or_malformed_v21_versions():
     services = _load_services_module()
-    for version in ("2.1.1-beta.1", "2.2.0-beta.1", "2.1.0-beta.0",
-                    "2.1.0-beta.01", "2.1.0-alpha.1", "2.1.0-beta.1extra"):
+    # Fork contract: the 2.2.x line is accepted alongside v2.0.5-v2.0.12 and
+    # v2.1.0; malformed prereleases and unrelated lines must still fail.
+    for version in ("2.2.0", "2.2.0-beta.1", "2.2.3-rc.2"):
+        status, _ = services._release_check_manifest_status(version)
+        assert status == "pass", version
+    for version in ("2.1.1-beta.1", "2.1.0-beta.0",
+                    "2.1.0-beta.01", "2.1.0-alpha.1", "2.1.0-beta.1extra",
+                    "2.3.0", "3.0.0"):
         status, _ = services._release_check_manifest_status(version)
         assert status == "fail", version
 

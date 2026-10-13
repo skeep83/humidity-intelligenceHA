@@ -157,14 +157,15 @@ class PagesSiteTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertIn(f"V{manifest['version']} · published Stable", normalized_html)
-        self.assertIn("Released on 12 October 2026", normalized_html)
+        # Fork: the site advertises the fork build linked to upstream v2.1.0.
+        self.assertIn(f"V{manifest['version']} · fork build", normalized_html)
+        self.assertIn("released 12 October 2026", normalized_html)
         self.assertIn("releases/tag/v2.1.0", html)
         self.assertIn("refresh repository information if an older version is shown", normalized_html)
         self.assertNotIn("awaits publication", normalized_html)
         self.assertNotIn("Install from GitHub", html)
         self.assertIn("Open in HACS", html)
-        self.assertIn(f"published release</span><span class=\"badge-value\">v{manifest['version']}", html)
+        self.assertIn(f"fork release</span><span class=\"badge-value\">v{manifest['version']}", html)
         self.assertIn("replace the complete saved YAML", normalized_html)
         self.assertIn("Existing RC.1 revision-9 cards remain compatible", normalized_html)
 
