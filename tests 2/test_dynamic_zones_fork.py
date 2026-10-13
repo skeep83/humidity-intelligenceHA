@@ -465,9 +465,102 @@ def test_night_bypass_runs_capped_extraction_and_blocks_others():
 
 
 # ---------------------------------------------------------------------------
-# Presentation: dynamic zone labels in the runtime copy
+# Options-flow end to end: add a third zone through the UI steps
 # ---------------------------------------------------------------------------
 
+def test_options_flow_adds_third_zone_with_fork_fields():
+    """Full UI path: zones menu -> ➕ Add a new zone -> edit form -> save.
+
+    Verifies the fork's dynamic zone machinery persists a well-formed zone3
+    with airflow/hysteresis fields, without touching zone1/zone2.
+    """
+    import test_config_flow_sanity as cfs
+
+    config_flow = cfs._load_config_flow_module()
+    entry = SimpleNamespace(
+        data={
+            "zones": {
+                "zone1": {
+                    "enabled": True, "level": "level1", "rooms": ["Kitchen"],
+                    "triggers": ["humidity_high"], "outputs": ["fan.kitchen"],
+                    "thresholds": {"humidity_high": 6}, "output_level": 33,
+                    "boost_output_level": 66, "ui_label": "First floor",
+                },
+                "zone2": {
+                    "enabled": False, "level": "level2", "rooms": [],
+                    "triggers": [], "outputs": [], "thresholds": {},
+                    "output_level": 33, "boost_output_level": 66, "ui_label": "Zone 2",
+                },
+            }
+        },
+        options={},
+    )
+    flow = config_flow.HumidityIntelligenceOptionsFlow(entry)
+    flow.hass = SimpleNamespace()
+
+    # The menu offers the existing zones plus ➕ add.
+    menu = asyncio.run(flow.async_step_options_zones())
+    values = cfs._schema_select_values(menu, "action")
+    assert "zone1" in values and "zone2" in values and "zone_add" in values
+
+    # ➕ Add a new zone lands on the edit form for zone3.
+    form = asyncio.run(flow.async_step_options_zones({"action": "zone_add"}))
+    assert form["step_id"] == "options_zone_edit"
+    assert flow._pending_zone_key == "zone3"
+
+    saved = asyncio.run(
+        flow.async_step_options_zone_edit(
+            {
+                "enabled": True,
+                "level": "level2",
+                "rooms": ["Master Bedroom"],
+                "triggers": ["humidity_absolute_high"],
+                "outputs": ["fan.master_recuperator"],
+                "priority": 15,
+                "airflow_mode": "exhaust",
+                "airflow_supply_direction": "auto",
+                "night_bypass": True,
+                "show_advanced_options": {
+                    "output_level": 33,
+                    "boost_output_level": 66,
+                    "ui_label": "Master",
+                    "humidity_hysteresis": 5.0,
+                    "humidity_on_hold_minutes": 20,
+                    "humidity_off_hold_minutes": 45,
+                },
+            }
+        )
+    )
+    assert saved["step_id"] == "options_zones"  # back to the zones menu after save
+
+    zones = flow._options["zones"]
+    assert set(zones) == {"zone1", "zone2", "zone3"}
+    zone3 = zones["zone3"]
+    assert zone3["enabled"] is True
+    assert zone3["rooms"] == ["Master Bedroom"]
+    assert zone3["triggers"] == ["humidity_absolute_high"]
+    assert zone3["outputs"] == ["fan.master_recuperator"]
+    assert zone3["priority"] == 15
+    assert zone3["airflow_mode"] == "exhaust"
+    assert zone3["night_bypass"] is True
+    assert zone3["humidity_hysteresis"] == 5.0
+    assert zone3["humidity_on_hold_minutes"] == 20
+    assert zone3["humidity_off_hold_minutes"] == 45
+    assert zone3["thresholds"]["humidity_absolute_high"] == 60
+    # Existing zones untouched.
+    assert zones["zone1"]["ui_label"] == "First floor"
+    assert zones["zone2"]["enabled"] is False
+
+    # ➖ Remove a zone deletes only the chosen zone.
+    remove_form = asyncio.run(flow.async_step_options_zone_remove())
+    assert remove_form["step_id"] == "options_zone_remove"
+    asyncio.run(flow.async_step_options_zone_remove({"zone_key": "zone3"}))
+    assert set(flow._options["zones"]) == {"zone1", "zone2"}
+
+
+# ---------------------------------------------------------------------------
+# Presentation: dynamic zone labels in the runtime copy
+# ---------------------------------------------------------------------------
 def test_third_zone_pressure_is_represented_in_runtime_copy():
     """The air_control_mode sensor must reflect a zone3-driven state with the
     zone's own display label."""
