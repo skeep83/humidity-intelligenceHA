@@ -127,11 +127,13 @@
       },
       "zones": {
         "title": "Zones",
-        "description": "Define up to two extractor/purifier zones.\n\nConfigured zones:\n{configured_zones}",
+        "description": "Define any number of extractor/purifier zones.\n\nConfigured zones:\n{configured_zones}",
         "menu_options": {
           "level_labels": "Level display labels",
           "zone1": "Configure Zone 1",
           "zone2": "Configure Zone 2",
+          "zone_add": "Add a new zone",
+          "zone_remove": "Remove a zone",
           "zones_done": "Done",
           "zones_back": "Back"
         }
@@ -204,7 +206,8 @@
           "humidity_high": "Humidity above house avg (delta %)",
           "condensation_risk": "Condensation risk (dew-point spread degC)",
           "mould_risk": "Mould risk level (1-3)",
-          "air_quality_bad": "Air quality bad (IAQ)"
+          "air_quality_bad": "Air quality bad (IAQ)",
+          "humidity_absolute_high": "Absolute room humidity threshold (%)"
         },
         "sections": {
           "show_advanced_options": {
@@ -411,6 +414,42 @@
         "data": {
           "ui_layouts": "UI layouts to export"
         }
+      },
+      "zone_edit": {
+        "title": "Configure zone",
+        "description": "Configure the essential zone mapping and outputs.\n\n{advanced_note}\n\nAdvanced tuning contains fan levels and the Current Air Control display label.\n\n{boost_guidance}",
+        "data": {
+          "enabled": "Enable zone",
+          "level": "Level",
+          "rooms": "Rooms",
+          "triggers": "Triggers",
+          "outputs": "Outputs",
+          "priority": "Zone priority (1 = highest, wins shared outputs)",
+          "airflow_mode": "Airflow direction when this zone runs",
+          "airflow_supply_direction": "Supply direction mapping",
+          "night_bypass": "Allow quiet night extraction (lowest step) when this zone's absolute humidity trigger is active"
+        },
+        "sections": {
+          "show_advanced_options": {
+            "name": "Show advanced tuning",
+            "description": "Open to customise deterministic tuning controls. Leave collapsed to keep recommended defaults.",
+            "data": {
+              "output_level": "Normal fan run level (Auto/33/66/100)",
+              "boost_output_level": "Boost fan run level (Auto/33/66/100) - danger/alert escalation level for this zone",
+              "ui_label": "Current Air Control display label for this zone",
+              "humidity_hysteresis": "Absolute humidity hysteresis (percentage points below threshold to clear)",
+              "humidity_on_hold_minutes": "Absolute humidity must be held this long before engaging (minutes)",
+              "humidity_off_hold_minutes": "Absolute humidity must be cleared this long before disengaging (minutes)"
+            }
+          }
+        }
+      },
+      "zone_remove": {
+        "title": "Remove a zone",
+        "description": "Select the zone to delete. Its outputs are freed for other zones or external automations.\n\nConfigured zones:\n{configured_zones}",
+        "data": {
+          "zone_key": "Zone to remove"
+        }
       }
     },
     "error": {
@@ -494,14 +533,46 @@
           "temperature_comfort_custom_low": "Custom temperature comfort low (°C)",
           "temperature_comfort_custom_high": "Custom temperature comfort high (°C)",
           "zone1_threshold_humidity_high": "Zone 1 humidity above house average (delta %)",
-          "zone1_threshold_condensation_risk": "Zone 1 condensation risk threshold (dew-point spread °C)",
+          "zone1_threshold_condensation_risk": "Zone 1 condensation risk threshold (dew-point spread C)",
           "zone1_threshold_mould_risk": "Zone 1 mould risk threshold (level 1-3)",
           "zone1_threshold_air_quality_bad": "Zone 1 air quality bad threshold (IAQ)",
           "zone2_threshold_humidity_high": "Zone 2 humidity above house average (delta %)",
-          "zone2_threshold_condensation_risk": "Zone 2 condensation risk threshold (dew-point spread °C)",
+          "zone2_threshold_condensation_risk": "Zone 2 condensation risk threshold (dew-point spread C)",
           "zone2_threshold_mould_risk": "Zone 2 mould risk threshold (level 1-3)",
           "zone2_threshold_air_quality_bad": "Zone 2 air quality bad threshold (IAQ)",
-          "show_advanced_options": "Show advanced tuning"
+          "show_advanced_options": "Show advanced tuning",
+          "zone1_threshold_humidity_absolute_high": "Zone 1 absolute room humidity threshold (%)",
+          "zone2_threshold_humidity_absolute_high": "Zone 2 absolute room humidity threshold (%)",
+          "zone3_threshold_humidity_high": "Zone 3 humidity above house average (delta %)",
+          "zone3_threshold_humidity_absolute_high": "Zone 3 absolute room humidity threshold (%)",
+          "zone3_threshold_condensation_risk": "Zone 3 condensation risk threshold (dew-point spread C)",
+          "zone3_threshold_mould_risk": "Zone 3 mould risk threshold (level 1-3)",
+          "zone3_threshold_air_quality_bad": "Zone 3 air quality bad threshold (IAQ)",
+          "zone4_threshold_humidity_high": "Zone 4 humidity above house average (delta %)",
+          "zone4_threshold_humidity_absolute_high": "Zone 4 absolute room humidity threshold (%)",
+          "zone4_threshold_condensation_risk": "Zone 4 condensation risk threshold (dew-point spread C)",
+          "zone4_threshold_mould_risk": "Zone 4 mould risk threshold (level 1-3)",
+          "zone4_threshold_air_quality_bad": "Zone 4 air quality bad threshold (IAQ)",
+          "zone5_threshold_humidity_high": "Zone 5 humidity above house average (delta %)",
+          "zone5_threshold_humidity_absolute_high": "Zone 5 absolute room humidity threshold (%)",
+          "zone5_threshold_condensation_risk": "Zone 5 condensation risk threshold (dew-point spread C)",
+          "zone5_threshold_mould_risk": "Zone 5 mould risk threshold (level 1-3)",
+          "zone5_threshold_air_quality_bad": "Zone 5 air quality bad threshold (IAQ)",
+          "zone6_threshold_humidity_high": "Zone 6 humidity above house average (delta %)",
+          "zone6_threshold_humidity_absolute_high": "Zone 6 absolute room humidity threshold (%)",
+          "zone6_threshold_condensation_risk": "Zone 6 condensation risk threshold (dew-point spread C)",
+          "zone6_threshold_mould_risk": "Zone 6 mould risk threshold (level 1-3)",
+          "zone6_threshold_air_quality_bad": "Zone 6 air quality bad threshold (IAQ)",
+          "zone7_threshold_humidity_high": "Zone 7 humidity above house average (delta %)",
+          "zone7_threshold_humidity_absolute_high": "Zone 7 absolute room humidity threshold (%)",
+          "zone7_threshold_condensation_risk": "Zone 7 condensation risk threshold (dew-point spread C)",
+          "zone7_threshold_mould_risk": "Zone 7 mould risk threshold (level 1-3)",
+          "zone7_threshold_air_quality_bad": "Zone 7 air quality bad threshold (IAQ)",
+          "zone8_threshold_humidity_high": "Zone 8 humidity above house average (delta %)",
+          "zone8_threshold_humidity_absolute_high": "Zone 8 absolute room humidity threshold (%)",
+          "zone8_threshold_condensation_risk": "Zone 8 condensation risk threshold (dew-point spread C)",
+          "zone8_threshold_mould_risk": "Zone 8 mould risk threshold (level 1-3)",
+          "zone8_threshold_air_quality_bad": "Zone 8 air quality bad threshold (IAQ)"
         },
         "sections": {
           "show_advanced_options": {
@@ -576,7 +647,7 @@
       },
       "options_zones": {
         "title": "Zone Options",
-        "description": "Edit level display labels before Zone 1 / Zone 2 configuration, or select a zone to edit.\n\nConfigured zones:\n{configured_zones}",
+        "description": "Edit level display labels, add/remove zones, or select a zone to edit.\n\nConfigured zones:\n{configured_zones}",
         "data": {
           "action": "Zone action"
         }
@@ -590,18 +661,18 @@
         }
       },
       "options_zone_edit": {
-        "title": "Edit Zone",
+        "title": "Edit zone",
         "description": "Editing {zone_label}. Keep the essential mapping visible; fan levels and label tuning are advanced.\n\n{advanced_note}\n\n{boost_guidance}",
         "data": {
           "enabled": "Enable zone",
           "level": "Level",
           "rooms": "Rooms",
-          "triggers": "Zone triggers",
-          "outputs": "Output devices",
-          "output_level": "Normal fan run level (Auto/33/66/100)",
-          "boost_output_level": "Boost fan run level (Auto/33/66/100) - danger/alert escalation level for this zone",
-          "ui_label": "Current Air Control label",
-          "show_advanced_options": "Show advanced tuning"
+          "triggers": "Triggers",
+          "outputs": "Outputs",
+          "priority": "Zone priority (1 = highest, wins shared outputs)",
+          "airflow_mode": "Airflow direction when this zone runs",
+          "airflow_supply_direction": "Supply direction mapping",
+          "night_bypass": "Allow quiet night extraction (lowest step) when this zone's absolute humidity trigger is active"
         },
         "sections": {
           "show_advanced_options": {
@@ -610,7 +681,10 @@
             "data": {
               "output_level": "Normal fan run level (Auto/33/66/100)",
               "boost_output_level": "Boost fan run level (Auto/33/66/100) - danger/alert escalation level for this zone",
-              "ui_label": "Current Air Control label"
+              "ui_label": "Current Air Control display label for this zone",
+              "humidity_hysteresis": "Absolute humidity hysteresis (percentage points below threshold to clear)",
+              "humidity_on_hold_minutes": "Absolute humidity must be held this long before engaging (minutes)",
+              "humidity_off_hold_minutes": "Absolute humidity must be cleared this long before disengaging (minutes)"
             }
           }
         }
@@ -879,6 +953,13 @@
         "data": {
           "replacement": "How to handle existing rules",
           "cancel": "Return without changing"
+        }
+      },
+      "options_zone_remove": {
+        "title": "Remove a zone",
+        "description": "Select the zone to delete from this configuration.",
+        "data": {
+          "zone_key": "Zone to remove"
         }
       }
     },

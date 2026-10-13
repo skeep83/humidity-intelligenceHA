@@ -6,6 +6,17 @@
 
 ## Domestic Environmental Stabilisation Engine for Home Assistant
 
+> **Quasar fork (skeep83/humidity-intelligenceHA).** This fork extends upstream
+> with: unlimited dynamic zones (add/remove any number of room zones in the UI,
+> not just Zone 1/Zone 2), per-output arbitration instead of zone1-suppresses-zone2,
+> semantic airflow direction per recuperator (supply/exhaust resolved to
+> forward/reverse per siku device_type: OPUS 17 forward=supply, VENTO 26
+> reverse=supply, with per-zone override), absolute room-humidity trigger with
+> on/off hold + hysteresis, quiet night extraction bypass through the time gate,
+> a tolerant fan-percentage dedup (siku reports 32 for a 33% target), and
+> disabled zones no longer reset their outputs. Install in HACS via this
+> repository as a custom repository (category: Integration).
+
 [![Latest Release](https://img.shields.io/github/v/release/senyo888/Humidity-Intelligence?display_name=tag&sort=semver)](https://github.com/senyo888/Humidity-Intelligence/releases)
 [![Project Site](https://img.shields.io/badge/Project%20Site-GitHub%20Pages-5aa8d6)](https://senyo888.github.io/humidity-intelligence/)
 [![HACS — Available in HACS](https://img.shields.io/badge/HACS-Available%20in%20HACS-41BDF5?logo=home-assistant&logoColor=white)](https://my.home-assistant.io/redirect/hacs_repository/?owner=senyo888&repository=humidity-intelligence&category=integration)
