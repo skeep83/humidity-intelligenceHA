@@ -334,7 +334,7 @@ class ConfigAdapterTests(unittest.TestCase):
 
     def test_malformed_and_unknown_role_sections_reject(self):
         cases = [
-            {'zones': []}, {'zones': {'zone3': {'outputs': [FAN]}}},
+            {'zones': []}, {'zones': {'zoneX': {'outputs': [FAN]}}},
             {'zones': {'zone1': None}}, {'humidifiers': {'zone1': {}}},
             {'aq': {'level3': {}}}, {'aq': {'level1': {'outputs': FAN}}},
             {'zones': {'zone1': {'outputs': ['bad entity']}}},

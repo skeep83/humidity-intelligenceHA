@@ -4,14 +4,35 @@ Whole-section options precedence follows config_flow._effective_config. Disabled
 roles still describe configured inventory. Selection/isolation/conflict can only
 come from explicitly supplied runtime context, never from config enable flags.
 """
+import re
+
 from .model import ENTITY, MAX_CONFIG
 
 
 SECTIONS = (
-    ('zones', (('zone1', 'ventilation_zone_1'), ('zone2', 'ventilation_zone_2'))),
     ('humidifiers', (('level1', 'humidifier_zone_1'), ('level2', 'humidifier_zone_2'))),
     ('aq', (('level1', 'aq'), ('level2', 'aq'))),
 )
+
+# Zones are dynamic in this fork (zone1, zone2, zone3, ...): roles are
+# generated from the saved config instead of a fixed table.
+ZONE_SECTION = 'zones'
+
+
+def _zone_roles(section: dict) -> tuple:
+    def _index(key: str) -> int:
+        digits = ''.join(ch for ch in key if ch.isdigit())
+        try:
+            return int(digits) if digits else 0
+        except ValueError:
+            return 0
+
+    roles = []
+    for key in sorted(section.keys(), key=lambda k: (_index(k), str(k))):
+        if not re.fullmatch(r"zone\d+", str(key)):
+            raise ValueError(f'{ZONE_SECTION} contains an unsupported role key: {key}.')
+        roles.append((key, f'ventilation_zone_{_index(key)}'))
+    return tuple(roles)
 CONTEXT = frozenset(('selected', 'isolated', 'safety_conflict'))
 
 
@@ -64,6 +85,21 @@ def extract_configured(data, options, labels=None, context=None):
             raise ValueError(f'{path} must be a list.')
         for entity in values:
             add(entity, role, path, enabled)
+
+    # Dynamic zones section: keys are zone1, zone2, zone3, ... (this fork).
+    zone_section = (
+        options.get(ZONE_SECTION) if ZONE_SECTION in options else data.get(ZONE_SECTION, {})
+    )
+    if not isinstance(zone_section, dict):
+        raise ValueError(f'{ZONE_SECTION} must be a dictionary.')
+    for key, role in _zone_roles(zone_section):
+        cfg = zone_section.get(key, {})
+        if not isinstance(cfg, dict):
+            raise ValueError(f'{ZONE_SECTION}.{key} must be a dictionary.')
+        enabled = cfg.get('enabled', False)
+        if type(enabled) is not bool:
+            raise ValueError('Configured role enable flags must be booleans.')
+        add_list(cfg.get('outputs', []), role, f'{ZONE_SECTION}.{key}.outputs', enabled)
 
     for section_name, roles in SECTIONS:
         section = options.get(section_name) if section_name in options else data.get(section_name, {})

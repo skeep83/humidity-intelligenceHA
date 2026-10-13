@@ -1230,6 +1230,13 @@ class HIAutomationEngine:
             return None
 
         zone_mode = self._zone_mode_from_zone(zone_key, zone)
+        overrides = dict(zone.get("airflow_overrides", {}) or {})
+        zone_supply = str(zone.get("airflow_supply_direction") or "").strip().lower()
+        if zone_supply in ("forward", "reverse"):
+            for entity_id in outputs:
+                entity_id = str(entity_id or "").strip()
+                if entity_id and entity_id not in overrides:
+                    overrides[entity_id] = {"supply_direction": zone_supply}
         return {
             "zone_key": zone_key,
             "priority": self._zone_priority_for(zone_key),
@@ -1237,7 +1244,7 @@ class HIAutomationEngine:
             "outputs": outputs,
             "run_level": run_level,
             "airflow": zone_airflow_semantic(zone),
-            "airflow_overrides": zone.get("airflow_overrides", {}) or {},
+            "airflow_overrides": overrides,
             "night_bypass": bool(zone.get("night_bypass"))
             and zone_airflow_semantic(zone) == AIRFLOW_EXTRACT,
             "absolute_active": bool(trigger_facts)

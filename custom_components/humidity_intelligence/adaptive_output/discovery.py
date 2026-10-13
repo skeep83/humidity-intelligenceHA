@@ -7,7 +7,7 @@ Identity tokens are internal binding metadata, not public diagnostics output.
 """
 import json
 from math import isfinite
-from .model import ENTITY, MAX_CONFIG, MAX_MAPPINGS, ROLES, SEMANTICS
+from .model import ENTITY, MAX_CONFIG, MAX_MAPPINGS, ROLES, SEMANTICS, is_known_role
 from .meanings import MEANING_ID, validate_library
 
 MAX_REGISTRY = 4096
@@ -118,7 +118,7 @@ def discover(configured, registry_entries, states, confirmations=None, retired=N
         raise ValueError('Confirmation collection exceeds supported bounds.')
     outputs = set()
     for item in configured:
-        if not isinstance(item, dict) or not _entity(item.get('entity_id')) or item.get('role') not in ROLES:
+        if not isinstance(item, dict) or not _entity(item.get('entity_id')) or not is_known_role(item.get('role')):
             raise ValueError('Configured outputs require valid entity IDs and roles.')
         outputs.add(item['entity_id'])
     registry, devices, identities = {}, {}, set()

@@ -10,7 +10,7 @@ from .const import HELPERS, MAX_PAYLOAD_BYTES
 from .compact import build_compact
 from .config_adapter import extract_configured
 from .discovery import _rule, identity
-from .model import ENTITY, MAX_MAPPINGS
+from .model import ENTITY, MAX_MAPPINGS, is_zone_role
 from .observer import DiscoverySession
 
 CUSTODY_VERSION = 2
@@ -152,7 +152,7 @@ class ObservationBridge:
         isolation = {}
         for entity, entity_roles in roles.items():
             keys = []
-            if entity_roles & {'ventilation_zone_1', 'ventilation_zone_2', 'aq'}:
+            if any(is_zone_role(role) for role in entity_roles) or 'aq' in entity_roles:
                 keys.append('air_isolate_fan_outputs')
             if entity_roles & {'humidifier_zone_1', 'humidifier_zone_2'}:
                 keys.append('air_isolate_humidifier_outputs')

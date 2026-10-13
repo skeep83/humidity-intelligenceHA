@@ -58,6 +58,10 @@ from .const import (
     CONF_LEVEL2_LABEL,
     HUMIDIFIER_BAND_MIN,
     HUMIDIFIER_BAND_MAX,
+    AIRFLOW_MODE_OPTIONS,
+    HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS,
+    HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES,
+    HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES,
     HUMIDIFIER_BAND_STEP,
     ALERT_DURATION_MIN,
     ALERT_DURATION_MAX,
@@ -200,7 +204,7 @@ def _level_label_schema(config: Optional[Dict[str, Any]] = None) -> vol.Schema:
 
 def _configured_zone_items(zones: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
     configured: List[Tuple[str, Dict[str, Any]]] = []
-    for zone_key in ("zone1", "zone2"):
+    for zone_key in _sorted_zone_keys(zones):
         zone = zones.get(zone_key)
         if not isinstance(zone, dict) or not zone:
             continue
@@ -208,6 +212,33 @@ def _configured_zone_items(zones: Dict[str, Any]) -> List[Tuple[str, Dict[str, A
             continue
         configured.append((zone_key, dict(zone)))
     return configured
+
+
+def _sorted_zone_keys(zones: Dict[str, Any]) -> List[str]:
+    """Stable zone key order: legacy zone1/zone2 first, then others by name."""
+    keys = [str(k) for k in (zones or {}).keys()]
+    order = {"zone1": 0, "zone2": 1}
+    return sorted(keys, key=lambda k: (order.get(k, 2 + _zone_index_from_key(k)), k))
+
+
+def _zone_index_from_key(zone_key: str) -> int:
+    digits = "".join(ch for ch in str(zone_key) if ch.isdigit())
+    try:
+        return int(digits) if digits else 0
+    except ValueError:
+        return 0
+
+
+def _next_zone_key(zones: Dict[str, Any]) -> str:
+    used = {str(k) for k in (zones or {}).keys()}
+    index = 1
+    while f"zone{index}" in used:
+        index += 1
+    return f"zone{index}"
+
+
+def _zone_level_options(config: Optional[Dict[str, Any]] = None) -> List[SelectOptionDict]:
+    return _level_value_label_options(config or {})
 
 
 class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -839,18 +870,88 @@ class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_zones(self, user_input: Optional[Dict[str, Any]] = None):
-        """Menu for zone configuration."""
+        """Menu for zone configuration (dynamic number of zones)."""
         zone_summary = _render_zones_summary(self._zones, self._data)
-        return self.async_show_menu(
+
+        if user_input is not None:
+            action = user_input.get("action", "zones_done")
+            if action == "zones_done":
+                return await self.async_step_humidifiers()
+            if action == "zones_back":
+                return await self.async_step_slope()
+            if action == "level_labels":
+                return await self.async_step_level_labels()
+            if action == "zone_add":
+                self._pending_zone_key = _next_zone_key(self._zones)
+                return await self._async_step_zone_config(self._pending_zone_key)
+            if action == "zone_remove":
+                return await self.async_step_zone_remove()
+            return await self._async_step_zone_config(str(action))
+
+        options: List[SelectOptionDict] = [
+            SelectOptionDict(value="level_labels", label="Level display labels")
+        ]
+        for zone_key, zone in _configured_zone_items(self._zones):
+            options.append(
+                SelectOptionDict(
+                    value=zone_key,
+                    label=_zone_choice_label(zone_key, zone, self._data),
+                )
+            )
+        options.append(SelectOptionDict(value="zone_add", label="➕ Add a new zone"))
+        if self._zones:
+            options.append(SelectOptionDict(value="zone_remove", label="➖ Remove a zone"))
+        options.append(SelectOptionDict(value="zones_done", label="Done with zones"))
+        options.append(SelectOptionDict(value="zones_back", label="Back"))
+        schema = vol.Schema(
+            {
+                vol.Required("action", default="zones_done"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
             step_id="zones",
-            menu_options=[
-                "level_labels",
-                "zone1",
-                "zone2",
-                "zones_done",
-                "zones_back",
-            ],
+            data_schema=schema,
             description_placeholders={"configured_zones": zone_summary},
+        )
+
+    async def async_step_zone_remove(self, user_input: Optional[Dict[str, Any]] = None):
+        """Delete one of the configured zones."""
+        zone_keys = _sorted_zone_keys(self._zones)
+        if not zone_keys:
+            return await self.async_step_zones()
+        if user_input is not None:
+            target = str(user_input.get("zone_key") or "")
+            if target in self._zones:
+                self._zones.pop(target, None)
+                self._data["zones"] = dict(self._zones)
+            return await self.async_step_zones()
+        schema = vol.Schema(
+            {
+                vol.Required("zone_key"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=key,
+                                label=_zone_choice_label(key, self._zones.get(key, {}), self._data),
+                            )
+                            for key in zone_keys
+                        ],
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="zone_remove",
+            data_schema=schema,
+            description_placeholders={
+                "configured_zones": _render_zones_summary(self._zones, self._data)
+            },
         )
 
     async def async_step_level_labels(self, user_input: Optional[Dict[str, Any]] = None):
@@ -862,8 +963,11 @@ class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return await self.async_step_zones()
 
+        return await self._async_show_level_labels("level_labels")
+
+    async def _async_show_level_labels(self, step_id: str):
         return self.async_show_form(
-            step_id="level_labels",
+            step_id=step_id,
             data_schema=_level_label_schema(self._data),
         )
 
@@ -899,6 +1003,51 @@ class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     existing.get("ui_label") or _default_zone_ui_label(zone_key),
                 ),
                 "thresholds": existing.get("thresholds", {}),
+                "priority": _bounded_int(
+                    user_input.get("priority", existing.get("priority", _zone_priority_for_new(zone_key))),
+                    1,
+                    99,
+                    _zone_priority_for_new(zone_key),
+                ),
+                "airflow_mode": _normalize_airflow_mode(
+                    user_input.get("airflow_mode", existing.get("airflow_mode", "none"))
+                ),
+                "airflow_supply_direction": _normalize_supply_direction(
+                    user_input.get(
+                        "airflow_supply_direction",
+                        existing.get("airflow_supply_direction", "auto"),
+                    )
+                ),
+                "night_bypass": bool(
+                    user_input.get("night_bypass", existing.get("night_bypass", False))
+                ),
+                "humidity_hysteresis": _bounded_float(
+                    user_input.get(
+                        "humidity_hysteresis",
+                        existing.get("humidity_hysteresis", HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS),
+                    ),
+                    0.0,
+                    20.0,
+                    HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS,
+                ),
+                "humidity_on_hold_minutes": _bounded_int(
+                    user_input.get(
+                        "humidity_on_hold_minutes",
+                        existing.get("humidity_on_hold_minutes", HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES),
+                    ),
+                    0,
+                    240,
+                    HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES,
+                ),
+                "humidity_off_hold_minutes": _bounded_int(
+                    user_input.get(
+                        "humidity_off_hold_minutes",
+                        existing.get("humidity_off_hold_minutes", HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES),
+                    ),
+                    0,
+                    720,
+                    HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES,
+                ),
             }
             self._zones[zone_key] = zone
             self._data["zones"] = self._zones
@@ -949,6 +1098,44 @@ class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Optional("outputs", default=zone_default("outputs", existing.get("outputs", []))): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["fan", "switch"], multiple=True)
             ),
+            vol.Optional(
+                "priority",
+                default=zone_default("priority", existing.get("priority", _zone_priority_for_new(zone_key))),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1, max=99, step=1, mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                "airflow_mode",
+                default=zone_default("airflow_mode", existing.get("airflow_mode", "none")),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="none", label="Do not control airflow direction"),
+                        selector.SelectOptionDict(value="supply", label="Supply (fresh air in) when triggered"),
+                        selector.SelectOptionDict(value="exhaust", label="Exhaust (moist air out) when triggered"),
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                "airflow_supply_direction",
+                default=zone_default("airflow_supply_direction", existing.get("airflow_supply_direction", "auto")),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="auto", label="Auto per recuperator model (recommended)"),
+                        selector.SelectOptionDict(value="forward", label="forward = supply"),
+                        selector.SelectOptionDict(value="reverse", label="reverse = supply"),
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                "night_bypass",
+                default=zone_default("night_bypass", existing.get("night_bypass", False)),
+            ): selector.BooleanSelector(),
         }
         schema_fields[vol.Optional(ADVANCED_OPTIONS_FIELD)] = _advanced_section({
             vol.Optional(
@@ -978,15 +1165,48 @@ class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Optional("ui_label", default=zone_default("ui_label", existing.get("ui_label", _default_zone_ui_label(zone_key)))): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             ),
+            vol.Optional(
+                "humidity_hysteresis",
+                default=zone_default("humidity_hysteresis", existing.get("humidity_hysteresis", HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.0, max=20.0, step=0.5, unit_of_measurement="%",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                "humidity_on_hold_minutes",
+                default=zone_default("humidity_on_hold_minutes", existing.get("humidity_on_hold_minutes", HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=240, step=5, unit_of_measurement="min",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                "humidity_off_hold_minutes",
+                default=zone_default("humidity_off_hold_minutes", existing.get("humidity_off_hold_minutes", HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=720, step=5, unit_of_measurement="min",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
         })
         schema = vol.Schema(schema_fields)
+        self._pending_zone_key = zone_key
         return self.async_show_form(
-            step_id=zone_key,
+            step_id="zone_edit",
             data_schema=schema,
             description_placeholders={
                 "boost_guidance": _boost_guidance_for_zone(existing),
                 "advanced_note": ADVANCED_DEFAULTS_NOTE,
             },
+        )
+
+    async def async_step_zone_edit(self, user_input: Optional[Dict[str, Any]] = None):
+        return await self._async_step_zone_config(
+            self._pending_zone_key or "zone1", user_input
         )
 
     async def async_step_zone_thresholds(self, user_input: Optional[Dict[str, Any]] = None):
@@ -1958,13 +2178,14 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
             for zone_key, zone in _configured_zone_items(zones):
                 previous_thresholds = dict(zone.get("thresholds", {}))
                 thresholds: Dict[str, Any] = {}
+                zone_triggers = zone.get("triggers", [])
                 for trig, trig_def in TRIGGER_DEFS.items():
                     field = f"{zone_key}_threshold_{trig}"
                     if field in user_input:
                         thresholds[trig] = user_input[field]
                     elif trig in previous_thresholds:
                         thresholds[trig] = previous_thresholds[trig]
-                    else:
+                    elif trig in zone_triggers:
                         thresholds[trig] = trig_def["default"]
                 zone["thresholds"] = thresholds
                 zones[zone_key] = zone
@@ -2313,9 +2534,9 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
         )
 
     async def async_step_options_zones(self, user_input: Optional[Dict[str, Any]] = None):
-        """Choose a zone to edit."""
+        """Choose a zone to edit (dynamic number of zones)."""
         zones = dict(self._section("zones", {}))
-        zone_keys = ["zone1", "zone2"]
+        zone_keys = _sorted_zone_keys(zones)
 
         if user_input is not None:
             action = user_input.get("action", "done")
@@ -2323,6 +2544,29 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
                 return await self.async_step_init()
             if action == "level_labels":
                 return await self.async_step_options_level_labels()
+            if action == "zone_add":
+                new_key = _next_zone_key(zones)
+                zones[new_key] = {
+                    "enabled": True,
+                    "level": _default_zone_level(new_key),
+                    "rooms": [],
+                    "triggers": [],
+                    "outputs": [],
+                    "output_level": ZONE_OUTPUT_LEVEL_DEFAULT,
+                    "boost_output_level": ZONE_OUTPUT_LEVEL_BOOST_DEFAULT,
+                    "ui_label": _default_zone_ui_label(new_key),
+                    "thresholds": {},
+                    "priority": _zone_priority_for_new(new_key),
+                    "airflow_mode": "none",
+                    "airflow_supply_direction": "auto",
+                    "night_bypass": False,
+                }
+                self._options["zones"] = zones
+                self._pending_zone_key = new_key
+                return await self.async_step_options_zone_edit()
+            if action == "zone_remove":
+                self._pending_zone_key = None
+                return await self.async_step_options_zone_remove()
             if action in zone_keys:
                 self._pending_zone_key = action
                 return await self.async_step_options_zone_edit()
@@ -2335,6 +2579,9 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
             )
             for key in zone_keys
         ])
+        options.append(SelectOptionDict(value="zone_add", label="➕ Add a new zone"))
+        if zone_keys:
+            options.append(SelectOptionDict(value="zone_remove", label="➖ Remove a zone"))
         options.append(SelectOptionDict(value="done", label="Done"))
         schema = vol.Schema({
             vol.Required("action", default="level_labels"): selector.SelectSelector(
@@ -2362,6 +2609,40 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
         return self.async_show_form(
             step_id="options_level_labels",
             data_schema=_level_label_schema(self._effective_config()),
+        )
+
+    async def async_step_options_zone_remove(self, user_input: Optional[Dict[str, Any]] = None):
+        """Delete one of the configured zones from options."""
+        zones = dict(self._section("zones", {}))
+        zone_keys = _sorted_zone_keys(zones)
+        if not zone_keys:
+            return await self.async_step_options_zones()
+        if user_input is not None:
+            target = str(user_input.get("zone_key") or "")
+            if target in zones:
+                zones.pop(target, None)
+                self._options["zones"] = zones
+                _LOGGER.info("Removed HI zone via options flow: %s", target)
+            return await self.async_step_options_zones()
+        schema = vol.Schema(
+            {
+                vol.Required("zone_key"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=key,
+                                label=_zone_choice_label(key, zones.get(key, {}), self._effective_config()),
+                            )
+                            for key in zone_keys
+                        ],
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="options_zone_remove",
+            data_schema=schema,
         )
 
     async def async_step_options_zone_edit(self, user_input: Optional[Dict[str, Any]] = None):
@@ -2417,6 +2698,51 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
                     zone.get("ui_label") or _default_zone_ui_label(zone_key),
                 ),
                 "thresholds": thresholds,
+                "priority": _bounded_int(
+                    user_input.get("priority", zone.get("priority", _zone_priority_for_new(zone_key))),
+                    1,
+                    99,
+                    _zone_priority_for_new(zone_key),
+                ),
+                "airflow_mode": _normalize_airflow_mode(
+                    user_input.get("airflow_mode", zone.get("airflow_mode", "none"))
+                ),
+                "airflow_supply_direction": _normalize_supply_direction(
+                    user_input.get(
+                        "airflow_supply_direction",
+                        zone.get("airflow_supply_direction", "auto"),
+                    )
+                ),
+                "night_bypass": bool(
+                    user_input.get("night_bypass", zone.get("night_bypass", False))
+                ),
+                "humidity_hysteresis": _bounded_float(
+                    user_input.get(
+                        "humidity_hysteresis",
+                        zone.get("humidity_hysteresis", HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS),
+                    ),
+                    0.0,
+                    20.0,
+                    HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS,
+                ),
+                "humidity_on_hold_minutes": _bounded_int(
+                    user_input.get(
+                        "humidity_on_hold_minutes",
+                        zone.get("humidity_on_hold_minutes", HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES),
+                    ),
+                    0,
+                    240,
+                    HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES,
+                ),
+                "humidity_off_hold_minutes": _bounded_int(
+                    user_input.get(
+                        "humidity_off_hold_minutes",
+                        zone.get("humidity_off_hold_minutes", HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES),
+                    ),
+                    0,
+                    720,
+                    HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES,
+                ),
             }
             self._options["zones"] = zones
             boost_warning = _boost_level_warning(
@@ -2468,6 +2794,44 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
             vol.Optional("outputs", default=zone_default("outputs", _sanitize_entity_ids(zone.get("outputs", [])))): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["fan", "switch"], multiple=True)
             ),
+            vol.Optional(
+                "priority",
+                default=zone_default("priority", zone.get("priority", _zone_priority_for_new(zone_key))),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1, max=99, step=1, mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                "airflow_mode",
+                default=zone_default("airflow_mode", zone.get("airflow_mode", "none")),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="none", label="Do not control airflow direction"),
+                        selector.SelectOptionDict(value="supply", label="Supply (fresh air in) when triggered"),
+                        selector.SelectOptionDict(value="exhaust", label="Exhaust (moist air out) when triggered"),
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                "airflow_supply_direction",
+                default=zone_default("airflow_supply_direction", zone.get("airflow_supply_direction", "auto")),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="auto", label="Auto per recuperator model (recommended)"),
+                        selector.SelectOptionDict(value="forward", label="forward = supply"),
+                        selector.SelectOptionDict(value="reverse", label="reverse = supply"),
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                "night_bypass",
+                default=zone_default("night_bypass", zone.get("night_bypass", False)),
+            ): selector.BooleanSelector(),
         }
         schema_fields[vol.Optional(ADVANCED_OPTIONS_FIELD)] = _advanced_section({
             vol.Optional(
@@ -2497,12 +2861,39 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
             vol.Optional("ui_label", default=zone_default("ui_label", zone.get("ui_label", _default_zone_ui_label(zone_key)))): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             ),
+            vol.Optional(
+                "humidity_hysteresis",
+                default=zone_default("humidity_hysteresis", zone.get("humidity_hysteresis", HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.0, max=20.0, step=0.5, unit_of_measurement="%",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                "humidity_on_hold_minutes",
+                default=zone_default("humidity_on_hold_minutes", zone.get("humidity_on_hold_minutes", HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=240, step=5, unit_of_measurement="min",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                "humidity_off_hold_minutes",
+                default=zone_default("humidity_off_hold_minutes", zone.get("humidity_off_hold_minutes", HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=720, step=5, unit_of_measurement="min",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
         })
         return self.async_show_form(
             step_id="options_zone_edit",
             data_schema=vol.Schema(schema_fields),
             description_placeholders={
-                "zone_label": "Zone 1" if zone_key == "zone1" else "Zone 2",
+                "zone_label": _zone_title(zone_key),
                 "boost_guidance": _boost_guidance_for_zone(zone),
                 "advanced_note": ADVANCED_DEFAULTS_NOTE,
             },
@@ -3615,6 +4006,33 @@ def _render_slope_summary(slope: Dict[str, Any]) -> str:
     return f"Mode: Slope disabled. Temperature chip row: {chips}."
 
 
+def _zone_priority_for_new(zone_key: str) -> int:
+    """Default arbitration priority for a zone key (legacy order preserved)."""
+    if zone_key == "zone1":
+        return 1
+    if zone_key == "zone2":
+        return 2
+    return 50
+
+
+def _normalize_airflow_mode(value: Any) -> str:
+    text = str(value or "none").strip().lower()
+    return text if text in AIRFLOW_MODE_OPTIONS else "none"
+
+
+def _normalize_supply_direction(value: Any) -> str:
+    text = str(value or "auto").strip().lower()
+    return text if text in ("auto", "forward", "reverse") else "auto"
+
+
+def _bounded_int(value: Any, min_value: int, max_value: int, fallback: int) -> int:
+    try:
+        parsed = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return fallback
+    return max(min_value, min(max_value, parsed))
+
+
 def _render_zones_summary(
     zones: Dict[str, Dict[str, Any]],
     config: Optional[Dict[str, Any]] = None,
@@ -3623,7 +4041,7 @@ def _render_zones_summary(
     if not zones:
         return "No zones configured yet."
     lines: List[str] = []
-    for zone_key in ("zone1", "zone2"):
+    for zone_key in _sorted_zone_keys(zones):
         zone = zones.get(zone_key)
         if not zone:
             continue

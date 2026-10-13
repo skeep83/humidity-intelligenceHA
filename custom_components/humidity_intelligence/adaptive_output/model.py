@@ -10,6 +10,24 @@ import re
 
 ROLES = ('ventilation_zone_1', 'ventilation_zone_2', 'aq', 'humidifier_zone_1',
          'humidifier_zone_2', 'alert_light', 'alert_power')
+
+
+def is_zone_role(role: str) -> bool:
+    """Dynamic zones: any ventilation_zone[_N] role counts as a zone role."""
+    return str(role or "").startswith("ventilation_zone")
+
+
+def is_known_role(role: object) -> bool:
+    return role in ROLES or is_zone_role(str(role or ""))
+
+
+def role_rank(role: str) -> int:
+    """Stable ordering rank: fixed roles first, dynamic zones after them."""
+    if role in ROLES:
+        return ROLES.index(role)
+    if is_zone_role(role):
+        return len(ROLES)
+    return len(ROLES) + 100
 SUPPORTED = {'fan', 'switch', 'humidifier', 'light'}
 DEVICE_ICONS = {'fan': 'fan', 'switch': 'toggle-switch-outline', 'humidifier': 'air-humidifier', 'light': 'lightbulb'}
 MAX_CONFIG = 128
@@ -100,12 +118,15 @@ def normalize(configured, states, mappings):
     if not isinstance(states, dict) or len(states) > 1024:
         raise ValueError('States must be a dictionary of at most 1024 entries.')
     for row in configured:
-        if not isinstance(row, dict) or not _id(row.get('entity_id')) or row.get('role') not in ROLES:
+        if not isinstance(row, dict) or not _id(row.get('entity_id')) or not is_known_role(row.get('role')):
             raise ValueError('Each output requires a valid entity ID and a known role.')
         if any(k in row and type(row[k]) is not bool for k in ('selected', 'isolated', 'safety_conflict')):
             raise ValueError('Runtime context must contain explicit booleans.')
     records, by_id, attention = [], {}, []
-    for role in ROLES:
+    ordered_roles = list(ROLES) + sorted(
+        {row['role'] for row in configured if is_zone_role(row.get('role'))}
+    )
+    for role in ordered_roles:
         for row in configured:
             if row['role'] != role:
                 continue
@@ -127,7 +148,7 @@ def normalize(configured, states, mappings):
             evidence=_text(evidence), action=action, source=source, severity=severity,
             tone='danger' if severity in (0, 4) else 'warning',
             icon=icon, selected=record['selected'] if record else False,
-            role_rank=ROLES.index(record['roles'][0]) if record else len(ROLES),
+            role_rank=role_rank(record['roles'][0]) if record else len(ROLES),
             inventory_index=record['index'] if record else MAX_CONFIG))
 
     for record in records:

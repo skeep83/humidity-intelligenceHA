@@ -13,7 +13,7 @@ def detect_zone_mapping_duplicates(
 ) -> Dict[str, List[str]]:
     """Find overlapping telemetry entity mappings across enabled zones."""
     zone_sources: Dict[str, Set[str]] = {}
-    for zone_key in ("zone1", "zone2"):
+    for zone_key in sorted(zones.keys() if isinstance(zones, dict) else []):
         zone_cfg = zones.get(zone_key)
         if not isinstance(zone_cfg, dict):
             continue

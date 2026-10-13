@@ -1085,10 +1085,11 @@ def test_setup_zones_menu_offers_level_display_labels_before_zone_configuration(
 
     result = asyncio.run(flow.async_step_zones())
 
-    assert result["menu_options"] == [
+    # Dynamic zones (this fork): the menu is a select form; with no zones yet
+    # it offers level labels, adding the first zone, done and back.
+    assert _schema_select_values(result, "action") == [
         "level_labels",
-        "zone1",
-        "zone2",
+        "zone_add",
         "zones_done",
         "zones_back",
     ]
@@ -1222,10 +1223,11 @@ def test_options_zone_options_offer_level_labels_before_zone_editing():
 
     form = asyncio.run(flow.async_step_options_zones())
 
+    # Dynamic zones (this fork): with no saved zones the menu offers level
+    # labels first, then adding a zone, then done.
     assert _schema_select_values(form, "action") == [
         "level_labels",
-        "zone1",
-        "zone2",
+        "zone_add",
         "done",
     ]
     assert _schema_select_labels(form, "action")[0] == "Level display labels"
