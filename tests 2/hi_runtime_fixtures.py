@@ -411,6 +411,9 @@ class _FakeState:
 class _FakeStates:
     def __init__(self, values):
         self._values = dict(values)
+        for entity_id, state in self._values.items():
+            if not getattr(state, "entity_id", None):
+                state.entity_id = entity_id
 
     def get(self, entity_id):
         return self._values.get(entity_id)
@@ -418,6 +421,16 @@ class _FakeStates:
     def is_state(self, entity_id, state):
         st = self._values.get(entity_id)
         return bool(st and st.state == state)
+
+    def async_all(self, domain=None):
+        items = list(self._values.items())
+        if domain:
+            items = [
+                (entity_id, state)
+                for entity_id, state in items
+                if entity_id.startswith(f"{domain}.")
+            ]
+        return [state for _entity_id, state in items]
 
 
 class _FakeServices:

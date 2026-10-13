@@ -4928,8 +4928,16 @@ class HIAutomationEngine:
                 _LOGGER.debug("Failed refreshing core binary sensor %s", getattr(sensor, "entity_id", "unknown"), exc_info=True)
 
     def _all_zone_outputs(self) -> List[str]:
+        """Outputs of enabled zones only.
+
+        A disabled zone must not touch its outputs at all (upstream reset
+        disabled-zone fans to auto every cycle, which fought external
+        automations and manual control of the same recuperators).
+        """
         outputs: List[str] = []
         for zone in self.zones.values():
+            if not zone.get("enabled"):
+                continue
             outputs.extend(zone.get("outputs", []))
         return list(set(outputs))
 

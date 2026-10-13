@@ -179,7 +179,11 @@ def detect_device_type(hass: Any, fan_entity_id: str) -> Optional[int]:
 
     if not candidates:
         suffix = DEVICE_TYPE_SENSOR_SUFFIX
-        for state in hass.states.async_all("sensor"):
+        try:
+            all_states = list(hass.states.async_all("sensor"))
+        except Exception:  # pragma: no cover - minimal test doubles
+            all_states = []
+        for state in all_states:
             eid = str(state.entity_id)
             if eid.endswith(suffix):
                 candidates.append(eid)
