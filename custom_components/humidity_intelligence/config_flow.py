@@ -72,6 +72,11 @@ from .const import (
     AQ_DURATION_STEP,
     ZONE_OUTPUT_LEVEL_DEFAULT,
     ZONE_OUTPUT_LEVEL_BOOST_DEFAULT,
+    ZONE_F_RSI_DEFAULT,
+    ZONE_F_RSI_MIN,
+    ZONE_F_RSI_MAX,
+    CONF_OUTDOOR_TEMPERATURE_ENTITY,
+    CONF_OUTDOOR_HUMIDITY_ENTITY,
     COMMON_ROOMS,
     FAN_OUTPUT_LEVEL_AUTO,
     FAN_OUTPUT_LEVEL_STEPS,
@@ -1021,6 +1026,12 @@ class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "night_bypass": bool(
                     user_input.get("night_bypass", existing.get("night_bypass", False))
                 ),
+                "f_rsi": _bounded_float(
+                    user_input.get("f_rsi", existing.get("f_rsi", ZONE_F_RSI_DEFAULT)),
+                    ZONE_F_RSI_MIN,
+                    ZONE_F_RSI_MAX,
+                    ZONE_F_RSI_DEFAULT,
+                ),
                 "humidity_hysteresis": _bounded_float(
                     user_input.get(
                         "humidity_hysteresis",
@@ -1138,6 +1149,17 @@ class HumidityIntelligenceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ): selector.BooleanSelector(),
         }
         schema_fields[vol.Optional(ADVANCED_OPTIONS_FIELD)] = _advanced_section({
+            vol.Optional(
+                "f_rsi",
+                default=zone_default("f_rsi", existing.get("f_rsi", ZONE_F_RSI_DEFAULT)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=ZONE_F_RSI_MIN,
+                    max=ZONE_F_RSI_MAX,
+                    step=0.01,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
             vol.Optional(
                 "output_level",
                 default=_normalize_fan_level_choice(
