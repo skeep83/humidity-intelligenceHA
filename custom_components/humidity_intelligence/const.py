@@ -141,6 +141,17 @@ SLOPE_MODE_CALCULATED = "hi_calculates"
 SLOPE_MODE_PROVIDED = "user_provided"
 SLOPE_MODE_NONE = "skip"
 
+# Moisture-excess trigger hysteresis (fork feature), in g/m3 of absolute
+# humidity above outdoor air. Ventilation only dries while that excess is
+# positive, so this - not indoor RH - is the physically correct switching
+# variable. The deadband is wide on purpose: RH sensors are typically +/-2..3 %
+# RH, which is already +/-0.6..0.9 g/m3 at room temperature, and a narrower band
+# would chase sensor noise and cycle the fans.
+MOISTURE_EXCESS_ON_DEFAULT = 1.5
+MOISTURE_EXCESS_OFF_DEFAULT = 0.5
+MOISTURE_EXCESS_ON_HOLD_MINUTES = 10
+MOISTURE_EXCESS_OFF_HOLD_MINUTES = 30
+
 # Trigger definitions for zone automations
 TRIGGER_DEFS = {
     "humidity_high": {
@@ -155,6 +166,20 @@ TRIGGER_DEFS = {
         "min": 35,
         "max": 95,
         "default": 60,
+        "unit": "%",
+    },
+    "moisture_excess": {
+        "label": "Moisture above outdoor air (drying window)",
+        "min": 0.3,
+        "max": 5.0,
+        "default": MOISTURE_EXCESS_ON_DEFAULT,
+        "unit": "g/m3",
+    },
+    "surface_mould_risk": {
+        "label": "Humidity at coldest surface",
+        "min": 70,
+        "max": 90,
+        "default": 80,
         "unit": "%",
     },
     "condensation_risk": {"label": "Condensation risk", "min": 2, "max": 6, "default": 4, "unit": "degC"},
@@ -195,6 +220,21 @@ FAN_PERCENTAGE_TOLERANCE = 2
 HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS = 5.0
 HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES = 20
 HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES = 45
+
+# Outdoor reference sensors (fork feature). Deliberately NOT part of the room
+# telemetry list: telemetry rows are keyed by room/level and are averaged into
+# the house and level figures, so an outdoor row would poison every average and
+# every threshold derived from them.
+CONF_OUTDOOR_TEMPERATURE_ENTITY = "outdoor_temperature_entity"
+CONF_OUTDOOR_HUMIDITY_ENTITY = "outdoor_humidity_entity"
+
+# Surface humidity criterion (ISO 13788 / BS 5250:2011): mould germinates above
+# 80 % RH at the surface, which a comfortable-looking room can reach on a cold
+# thermal bridge. f_Rsi is a property of the junction, measured once; 0.70 is
+# the DIN 4108-2 minimum for dwellings and the safe default when unmeasured.
+ZONE_F_RSI_DEFAULT = 0.70
+ZONE_F_RSI_MIN = 0.40
+ZONE_F_RSI_MAX = 1.00
 
 # Trigger definitions for AQ automations
 AQ_TRIGGER_DEFS = {

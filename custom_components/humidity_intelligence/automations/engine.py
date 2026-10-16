@@ -42,6 +42,15 @@ from ..const import (
     HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS,
     HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES,
     HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES,
+    CONF_OUTDOOR_TEMPERATURE_ENTITY,
+    CONF_OUTDOOR_HUMIDITY_ENTITY,
+    MOISTURE_EXCESS_ON_DEFAULT,
+    MOISTURE_EXCESS_OFF_DEFAULT,
+    MOISTURE_EXCESS_ON_HOLD_MINUTES,
+    MOISTURE_EXCESS_OFF_HOLD_MINUTES,
+    ZONE_F_RSI_DEFAULT,
+    ZONE_F_RSI_MIN,
+    ZONE_F_RSI_MAX,
     HUMIDIFIER_RECOVERY_IN_BAND_DEFAULT,
     HUMIDIFIER_RECONCILE_CONFIRM_SECONDS,
     HUMIDIFIER_RECONCILE_HISTORY_LIMIT,
@@ -72,6 +81,11 @@ from ..helpers.seasonal import (
     humidity_state as seasonal_humidity_state,
     mould_level as seasonal_mould_level,
     resolve_target_profile,
+)
+from ..helpers.psychrometrics import (
+    CRITICAL_SURFACE_RH,
+    moisture_excess as psychro_moisture_excess,
+    surface_relative_humidity as psychro_surface_rh,
 )
 
 CO_EMERGENCY_START = 15
@@ -1449,6 +1463,44 @@ class HIAutomationEngine:
                             comparison="at_or_above",
                         )
                     )
+            elif trig == "moisture_excess":
+                matched, measured, threshold_val = self._evaluate_moisture_excess(
+                    zone, threshold, zone_key=zone_key
+                )
+                if matched and measured is not None:
+                    selected_level = _max_fan_level(selected_level, normal_level)
+                    trigger_details.append(
+                        f"Moisture excess {measured:.1f} g/m3 >= threshold "
+                        f"{threshold_val:g} g/m3 (outdoor air is drier, ventilation removes water)"
+                    )
+                    trigger_facts.append(
+                        _TriggerFact(
+                            code="moisture_excess",
+                            measured=round(measured, 1),
+                            threshold=threshold_val,
+                            unit="g_per_m3",
+                            comparison="at_or_above",
+                        )
+                    )
+            elif trig == "surface_mould_risk":
+                matched, measured, threshold_val = self._evaluate_surface_mould_risk(
+                    zone, threshold
+                )
+                if matched and measured is not None:
+                    selected_level = _max_fan_level(selected_level, boost_level)
+                    trigger_details.append(
+                        f"Surface humidity {measured:.1f}% >= critical {threshold_val:g}% "
+                        f"(f_Rsi {self._zone_f_rsi(zone):.2f}; mould criterion ISO 13788)"
+                    )
+                    trigger_facts.append(
+                        _TriggerFact(
+                            code="surface_mould_risk",
+                            measured=round(measured, 1),
+                            threshold=threshold_val,
+                            unit="percentage",
+                            comparison="at_or_above",
+                        )
+                    )
             elif trig == "humidity_high":
                 zone_rooms = zone.get("rooms", [])
                 room_avg = self._rooms_avg("humidity", zone_rooms)
@@ -1599,6 +1651,144 @@ class HIAutomationEngine:
             state["off_since"] = None
 
         return bool(state["active"]), room_avg, threshold_val
+
+    def _outdoor_conditions(self) -> Tuple[Optional[float], Optional[float]]:
+        """Outdoor temperature (degC) and relative humidity (%), or (None, None).
+
+        Read from dedicated config keys rather than the telemetry list on
+        purpose: telemetry rows carry a room/level and feed the house and level
+        averages, so an outdoor row would corrupt every average and every
+        threshold derived from them.
+        """
+        config = self._effective_config()
+        temp = _get_float(
+            self.hass,
+            config.get(CONF_OUTDOOR_TEMPERATURE_ENTITY),
+            sensor_type="temperature",
+        )
+        rh = _get_float(
+            self.hass,
+            config.get(CONF_OUTDOOR_HUMIDITY_ENTITY),
+            sensor_type="humidity",
+        )
+        return temp, rh
+
+    def _zone_f_rsi(self, zone: Dict[str, Any]) -> float:
+        """Temperature factor of the coldest junction in the zone (ISO 13788)."""
+        value = _to_float(zone.get("f_rsi"))
+        if value is None:
+            return ZONE_F_RSI_DEFAULT
+        return max(ZONE_F_RSI_MIN, min(ZONE_F_RSI_MAX, value))
+
+    def _evaluate_moisture_excess(
+        self,
+        zone: Dict[str, Any],
+        threshold: Any,
+        zone_key: Optional[str] = None,
+    ) -> Tuple[bool, Optional[float], float]:
+        """Drying-window trigger: zone moisture above outdoor air, in g/m3.
+
+        Ventilation removes water only while the indoor absolute humidity
+        exceeds the outdoor one; below that it imports water. Comparing indoor
+        RH against a constant cannot see this and fires in both wrong
+        directions, so this trigger switches on the excess itself with a wide
+        deadband (RH sensor error alone is +/-0.6..0.9 g/m3 at room
+        temperature).
+
+        Returns (matched, measured_excess, threshold).
+        """
+        on_threshold = _to_float(threshold)
+        if on_threshold is None:
+            on_threshold = MOISTURE_EXCESS_ON_DEFAULT
+
+        out_temp, out_rh = self._outdoor_conditions()
+        if out_temp is None or out_rh is None:
+            # No outdoor reference configured or sensor unavailable: stay silent
+            # rather than guess. Zones keep working on their other triggers.
+            return False, None, on_threshold
+
+        zone_rooms = zone.get("rooms", [])
+        room_rh = self._rooms_avg("humidity", zone_rooms)
+        room_temp = self._rooms_avg("temperature", zone_rooms)
+        excess = psychro_moisture_excess(room_temp, room_rh, out_temp, out_rh)
+        if excess is None:
+            return False, None, on_threshold
+
+        off_threshold = _to_float(zone.get("moisture_excess_off"))
+        if off_threshold is None:
+            off_threshold = min(MOISTURE_EXCESS_OFF_DEFAULT, on_threshold)
+        off_threshold = min(off_threshold, on_threshold)
+
+        on_hold = _bounded_int(
+            zone.get("moisture_excess_on_hold_minutes", MOISTURE_EXCESS_ON_HOLD_MINUTES),
+            0,
+            240,
+            MOISTURE_EXCESS_ON_HOLD_MINUTES,
+        )
+        off_hold = _bounded_int(
+            zone.get("moisture_excess_off_hold_minutes", MOISTURE_EXCESS_OFF_HOLD_MINUTES),
+            0,
+            720,
+            MOISTURE_EXCESS_OFF_HOLD_MINUTES,
+        )
+
+        state_key = f"moisture::{zone_key or zone.get('zone_key') or id(zone)}"
+        state = self._absolute_humidity_state.setdefault(
+            state_key, {"active": False, "on_since": None, "off_since": None}
+        )
+        now = dt_util.utcnow()
+
+        if excess >= on_threshold:
+            state["on_since"] = state["on_since"] or now
+            state["off_since"] = None
+            if not state["active"]:
+                if (now - state["on_since"]).total_seconds() >= on_hold * 60:
+                    state["active"] = True
+                    state["on_since"] = None
+        elif excess <= off_threshold:
+            state["off_since"] = state["off_since"] or now
+            state["on_since"] = None
+            if state["active"]:
+                if (now - state["off_since"]).total_seconds() >= off_hold * 60:
+                    state["active"] = False
+                    state["off_since"] = None
+        else:
+            state["on_since"] = None
+            state["off_since"] = None
+
+        return bool(state["active"]), excess, on_threshold
+
+    def _evaluate_surface_mould_risk(
+        self,
+        zone: Dict[str, Any],
+        threshold: Any,
+    ) -> Tuple[bool, Optional[float], float]:
+        """Mould trigger measured where mould actually grows: on the surface.
+
+        Room air at a comfortable 60 % can still sit against a window reveal
+        above the 80 % criterion of ISO 13788 / BS 5250. Because the surface
+        temperature follows the outdoor temperature through f_Rsi, this
+        threshold slides with the weather instead of being a fixed indoor RH.
+
+        Returns (matched, measured_surface_rh, threshold).
+        """
+        limit = _to_float(threshold)
+        if limit is None:
+            limit = CRITICAL_SURFACE_RH
+
+        out_temp, _out_rh = self._outdoor_conditions()
+        if out_temp is None:
+            return False, None, limit
+
+        zone_rooms = zone.get("rooms", [])
+        room_rh = self._rooms_avg("humidity", zone_rooms)
+        room_temp = self._rooms_avg("temperature", zone_rooms)
+        surface_rh = psychro_surface_rh(
+            room_temp, room_rh, out_temp, self._zone_f_rsi(zone)
+        )
+        if surface_rh is None:
+            return False, None, limit
+        return surface_rh >= limit, surface_rh, limit
 
     async def _handle_aq(self) -> Tuple[bool, List[Dict[str, Any]]]:
         active = False
