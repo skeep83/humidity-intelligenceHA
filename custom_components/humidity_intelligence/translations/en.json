@@ -474,6 +474,7 @@
           "options_sensors": "Sensors",
           "options_gates": "Operating schedule & limits",
           "options_thresholds": "Comfort and thresholds",
+          "options_outdoor": "Outdoor reference sensors",
           "options_telemetry": "Sensors",
           "options_zones": "Zones",
           "options_humidifiers": "Humidifier control",
@@ -591,6 +592,14 @@
               "zone2_threshold_air_quality_bad": "Zone 2 air quality bad threshold (IAQ)"
             }
           }
+        }
+      },
+      "options_outdoor": {
+        "title": "Outdoor reference sensors",
+        "description": "Ventilation only dries a room while the air outside holds less water than the air inside, so these two sensors decide whether running the fans removes moisture or imports it.\n\nThey are kept separate from room sensors on purpose: room sensors are averaged into the house and level figures, and an outdoor reading would drag every one of those averages.\n\nLeave empty to disable the outdoor-aware triggers; zones then keep working on their other triggers.",
+        "data": {
+          "outdoor_temperature_entity": "Outdoor temperature sensor",
+          "outdoor_humidity_entity": "Outdoor humidity sensor"
         }
       },
       "options_presence_states": {

@@ -1886,6 +1886,7 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
                 "options_sensors",
                 "options_gates",
                 "options_thresholds",
+                "options_outdoor",
                 "options_zones",
                 "options_humidifiers",
                 "options_aq",
@@ -1915,6 +1916,43 @@ class HumidityIntelligenceOptionsFlow(OutputObservationOptionsMixin, config_entr
                 "walkthrough_url": CONFIGURATION_WALKTHROUGH_URL,
             },
         )
+
+    async def async_step_options_outdoor(self, user_input: Optional[Dict[str, Any]] = None):
+        """Pick the outdoor temperature/humidity reference sensors.
+
+        These are deliberately kept out of the room telemetry list: telemetry
+        rows are keyed by room/level and feed the house and level averages, so
+        an outdoor row would drag every average and every threshold derived
+        from them. Without these two the outdoor-aware triggers stay silent and
+        zones keep running on their other triggers.
+        """
+        if user_input is not None:
+            flat = _flatten_advanced_section_input(user_input) or {}
+            temp_entity = (flat.get(CONF_OUTDOOR_TEMPERATURE_ENTITY) or "").strip()
+            rh_entity = (flat.get(CONF_OUTDOOR_HUMIDITY_ENTITY) or "").strip()
+            self._options[CONF_OUTDOOR_TEMPERATURE_ENTITY] = temp_entity
+            self._options[CONF_OUTDOOR_HUMIDITY_ENTITY] = rh_entity
+            return await self.async_step_init()
+
+        schema = vol.Schema({
+            vol.Optional(
+                CONF_OUTDOOR_TEMPERATURE_ENTITY,
+                description={
+                    "suggested_value": self._section(CONF_OUTDOOR_TEMPERATURE_ENTITY, "")
+                },
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["sensor", "weather"])
+            ),
+            vol.Optional(
+                CONF_OUTDOOR_HUMIDITY_ENTITY,
+                description={
+                    "suggested_value": self._section(CONF_OUTDOOR_HUMIDITY_ENTITY, "")
+                },
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["sensor", "weather"])
+            ),
+        })
+        return self.async_show_form(step_id="options_outdoor", data_schema=schema)
 
     async def async_step_options_gates(self, user_input: Optional[Dict[str, Any]] = None):
         """Edit global time/presence gates from post-configuration options."""
