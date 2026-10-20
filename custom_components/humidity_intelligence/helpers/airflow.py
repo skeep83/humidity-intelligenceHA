@@ -79,6 +79,25 @@ def normalize_semantic_airflow(value: Any) -> Optional[str]:
     return None
 
 
+def is_ecovent_fan(hass: Any, entity_id: str) -> bool:
+    """True when the fan entity is served by the ecovent_v2 integration.
+
+    ecovent_v2 exposes no ``*_device_type`` sensor, but its direction
+    semantics are uniform across all supported families: ``reverse`` maps to
+    the ``air_supply`` airflow (supply) and ``forward`` to ``ventilation``
+    (continuous exhaust). Verified live 20.10.2026 on VENTO (type 26) and
+    Freshpoint (type 17) units.
+    """
+    try:
+        from homeassistant.helpers import entity_registry as er_module
+
+        er = er_module.async_get(hass)
+        entry = er.async_get(entity_id)
+        return entry is not None and entry.platform == "ecovent_v2"
+    except Exception:  # pragma: no cover - registry unavailable in stubs
+        return False
+
+
 def resolve_output_airflow(
     hass: Any,
     entity_id: str,
@@ -105,6 +124,10 @@ def resolve_output_airflow(
         supply_direction = SUPPLY_DIRECTION_BY_DEVICE_TYPE[device_type]
         exhaust_direction = EXHAUST_DIRECTION_BY_DEVICE_TYPE[device_type]
         source = "auto"
+    elif is_ecovent_fan(hass, entity_id):
+        supply_direction = SIKU_REVERSE   # ecovent: reverse -> air_supply airflow
+        exhaust_direction = SIKU_FORWARD  # ecovent: forward -> ventilation airflow
+        source = "ecovent"
     else:
         return OutputAirflowPlan(
             entity_id=entity_id,
@@ -224,6 +247,22 @@ def _to_int(value: Any) -> Optional[int]:
 def zone_airflow_semantic(zone: Dict[str, Any]) -> str:
     """Return the zone's airflow semantic with a safe default."""
     return normalize_semantic_airflow(zone.get("airflow_mode")) or AIRFLOW_NONE
+
+
+def effective_direction(state: Any) -> str:
+    """Direction the fan is actually delivering, '' when recuperating.
+
+    ecovent_v2 maps heat_recovery to direction=forward, so the raw attribute
+    cannot tell continuous exhaust from recuperation; oscillating=True means
+    the unit alternates and no continuous direction is in effect. Siku
+    reports direction=None while oscillating, so the rule is identical there.
+    """
+    if state is None:
+        return ""
+    attrs = getattr(state, "attributes", None) or {}
+    if attrs.get("oscillating"):
+        return ""
+    return str(attrs.get("direction") or "").lower()
 
 
 def build_zone_airflow_plans(

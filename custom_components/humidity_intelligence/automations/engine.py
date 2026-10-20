@@ -19,6 +19,8 @@ from ..helpers.airflow import (
     AIRFLOW_EXTRACT,
     AIRFLOW_NONE,
     detect_device_type,
+    effective_direction,
+    is_ecovent_fan,
     resolve_output_airflow,
     zone_airflow_semantic,
 )
@@ -1363,7 +1365,7 @@ class HIAutomationEngine:
             )
             return None
         state = self.hass.states.get(entity_id)
-        current = str((state.attributes.get("direction") if state else "") or "").lower()
+        current = effective_direction(state)
         if current == plan.siku_direction:
             return plan.siku_direction
         if not self.hass.services.has_service("fan", "set_direction"):
@@ -1389,6 +1391,7 @@ class HIAutomationEngine:
         """
         needs_timer = any(
             detect_device_type(self.hass, entity_id) in AIRFLOW_REASSERT_DEVICE_TYPES
+            or is_ecovent_fan(self.hass, entity_id)
             for entity_id in self._airflow_targets
         )
         if needs_timer and self._airflow_reassert_unsub is None:
@@ -1408,7 +1411,7 @@ class HIAutomationEngine:
             state = self.hass.states.get(entity_id)
             if state is None or state.state in {"unavailable", "unknown"}:
                 continue
-            current = str(state.attributes.get("direction") or "").lower()
+            current = effective_direction(state)
             if current == wanted:
                 continue
             if not self.hass.services.has_service("fan", "set_direction"):
