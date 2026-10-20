@@ -212,6 +212,10 @@ AIRFLOW_REASSERT_DEVICE_TYPES = {17}
 # reports 32 for a 33% manual target (integer rounding), and an exact
 # comparison makes HI re-send commands on every evaluation (audible beeps).
 FAN_PERCENTAGE_TOLERANCE = 2
+# ecovent_v2 fans have no "auto" preset; recuperation is oscillating=True
+# (heat_recovery airflow). When HI returns such a fan to auto it sets this
+# base percentage (matches the zones' normal output level 33).
+ECO_RECOVER_PERCENTAGE = 33
 
 # Absolute-humidity trigger hysteresis (fork feature). The trigger turns on
 # when the zone average stays at/above the configured threshold for ON_HOLD

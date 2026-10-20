@@ -37,6 +37,7 @@ from ..const import (
     FAN_OUTPUT_LEVEL_AUTO,
     FAN_OUTPUT_LEVEL_STEPS,
     FAN_PERCENTAGE_TOLERANCE,
+    ECO_RECOVER_PERCENTAGE,
     CONF_ALERT_HANDLING_ENABLED,
     DEFAULT_ALERT_HANDLING_ENABLED,
     HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS,
@@ -5536,6 +5537,44 @@ async def _set_fan_auto(
                 continue
             preset_mode = str(state.attributes.get("preset_mode", "")).lower() if state else ""
             if preset_mode == "auto":
+                continue
+            preset_modes = [
+                str(p).lower()
+                for p in ((state.attributes.get("preset_modes") or []) if state else [])
+            ]
+            if state is not None and preset_modes and "auto" not in preset_modes:
+                # ecovent_v2-style fans have no "auto" preset: recuperation
+                # mode is oscillating=True (heat_recovery airflow). Return
+                # them there at the base speed instead of sending a preset
+                # the integration would reject with an error.
+                if not hass.services.has_service("fan", "oscillate"):
+                    _LOGGER.debug("Skipping eco auto for %s; oscillate unavailable", entity_id)
+                    continue
+                try:
+                    if not state.attributes.get("oscillating"):
+                        if should_abort and should_abort():
+                            return
+                        await hass.services.async_call(
+                            "fan", "turn_on", {"entity_id": entity_id}, blocking=False
+                        )
+                        await hass.services.async_call(
+                            "fan",
+                            "oscillate",
+                            {"entity_id": entity_id, "oscillating": True},
+                            blocking=False,
+                        )
+                    current_pct = state.attributes.get("percentage")
+                    if current_pct is None or abs(int(current_pct) - ECO_RECOVER_PERCENTAGE) > FAN_PERCENTAGE_TOLERANCE:
+                        if should_abort and should_abort():
+                            return
+                        await hass.services.async_call(
+                            "fan",
+                            "set_percentage",
+                            {"entity_id": entity_id, "percentage": ECO_RECOVER_PERCENTAGE},
+                            blocking=False,
+                        )
+                except Exception:
+                    _LOGGER.exception("Failed to return eco fan %s to recuperation", entity_id)
                 continue
             try:
                 if should_abort and should_abort():
