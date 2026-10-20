@@ -261,9 +261,9 @@ def test_airflow_helpers_resolve_opus_and_vento_semantics():
         states=_FakeStates({"sensor.vento_1_device_type": _FakeState("26")})
     )
     plan = airflow.resolve_output_airflow(hass_opus, "fan.opus_1", "supply", {})
-    assert plan.siku_direction == "forward" and plan.source == "auto"
+    assert plan.siku_direction == "reverse" and plan.source == "auto"
     plan = airflow.resolve_output_airflow(hass_opus, "fan.opus_1", "exhaust", {})
-    assert plan.siku_direction == "reverse"
+    assert plan.siku_direction == "forward"
     plan = airflow.resolve_output_airflow(hass_vento, "fan.vento_1", "supply", {})
     assert plan.siku_direction == "reverse" and plan.source == "auto"
     plan = airflow.resolve_output_airflow(hass_vento, "fan.vento_1", "exhaust", {})

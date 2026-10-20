@@ -1,10 +1,12 @@
 """Airflow direction helpers for zone outputs (supply/exhaust semantics).
 
-The physical meaning of siku's ``forward``/``reverse`` differs per recuperator
-model family:
+The physical meaning of direction values is UNIFIED across both recuperator
+families (measured 30.09.2026 with the physical Приток/Вытяжка buttons and
+re-confirmed 20.10.2026 through ecovent_v2 airflow reads on both models):
 
-- Blauberg Freshpoint (OPUS, siku device_type 17): ``forward`` = supply.
-- Blauberg VENTO Expert (siku device_type 26): ``reverse`` = supply.
+- ``reverse``  = supply (outside air blows in)
+- ``forward``  = continuous exhaust
+- oscillating / heat_recovery = recuperation
 
 Zones are configured with *semantic* directions (``supply`` / ``exhaust``) and
 each output entity resolves them to a concrete siku direction through a
@@ -33,15 +35,19 @@ SIKU_FORWARD = "forward"
 SIKU_REVERSE = "reverse"
 SIKU_ALTERNATING = "alternating"
 
-# device_type -> concrete siku direction that means "supply" for that family.
+# device_type -> concrete direction value that means "supply" for that family.
+# Measured 30.09.2026 (physical Приток/Вытяжка buttons vs direction attribute)
+# and re-confirmed 20.10.2026 through ecovent_v2 (reverse -> air_supply
+# airflow) on both Freshpoint 160-E (type 17) and VENTO inHome (type 26):
+# the semantics are UNIFIED - reverse = supply, forward = exhaust.
 SUPPLY_DIRECTION_BY_DEVICE_TYPE: Dict[int, str] = {
-    17: SIKU_FORWARD,   # Freshpoint OPUS: forward blows outside air in.
+    17: SIKU_REVERSE,   # Freshpoint OPUS: reverse blows outside air in.
     26: SIKU_REVERSE,   # VENTO Expert: reverse blows outside air in.
 }
 
-# device_type -> concrete siku direction that means "exhaust".
+# device_type -> concrete direction value that means "exhaust".
 EXHAUST_DIRECTION_BY_DEVICE_TYPE: Dict[int, str] = {
-    17: SIKU_REVERSE,
+    17: SIKU_FORWARD,
     26: SIKU_FORWARD,
 }
 
