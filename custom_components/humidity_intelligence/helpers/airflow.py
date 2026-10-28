@@ -226,6 +226,83 @@ def zone_airflow_semantic(zone: Dict[str, Any]) -> str:
     return normalize_semantic_airflow(zone.get("airflow_mode")) or AIRFLOW_NONE
 
 
+# Airflow-mode select (EcoVent/Blauberg via ecovent_v2). These units have no
+# siku device_type, so direction commands are suppressed for them; their airflow
+# is a select entity on the same device instead. Its options are:
+#   heat_recovery - reversing regeneration (the normal state)
+#   ventilation   - one-way extraction on reversing room units (TwinFresh/VENTO)
+#   extract       - one-way extraction on Breezy units
+#   air_supply    - one-way supply
+SELECT_HEAT_RECOVERY = "heat_recovery"
+SELECT_EXTRACT_OPTIONS = ("extract", "ventilation")
+SELECT_SUPPLY_OPTION = "air_supply"
+AIRFLOW_SELECT_SUFFIX = "_airflow"
+
+
+def find_airflow_select(hass: Any, fan_entity_id: str) -> Optional[str]:
+    """Return the airflow-mode select entity that belongs to a fan, or None.
+
+    Only a select that offers ``heat_recovery`` qualifies, so HI always knows how
+    to hand the unit back to its normal regenerating state. The select must sit on
+    the fan's device (entity registry); without a registry, its object id must
+    start with the fan's object id.
+    """
+    states = getattr(hass, "states", None)
+    if states is None or not str(fan_entity_id).startswith("fan."):
+        return None
+    candidates: List[str] = []
+    try:
+        from homeassistant.helpers import entity_registry as er_module
+
+        er = er_module.async_get(hass)
+        fan_entry = er.async_get(fan_entity_id)
+    except Exception:  # pragma: no cover - registry unavailable in stubs
+        er = fan_entry = None
+    if fan_entry is not None and getattr(fan_entry, "device_id", None):
+        try:
+            for entry in er.entities.values():
+                eid = str(entry.entity_id)
+                if (
+                    entry.device_id == fan_entry.device_id
+                    and eid.startswith("select.")
+                    and eid.endswith(AIRFLOW_SELECT_SUFFIX)
+                ):
+                    candidates.append(eid)
+        except Exception:  # pragma: no cover
+            candidates = []
+    else:
+        prefix = "select." + str(fan_entity_id).split(".", 1)[1] + "_"
+        try:
+            all_states = list(states.async_all("select"))
+        except Exception:  # pragma: no cover - minimal test doubles
+            all_states = []
+        candidates = [
+            str(s.entity_id)
+            for s in all_states
+            if str(s.entity_id).startswith(prefix)
+            and str(s.entity_id).endswith(AIRFLOW_SELECT_SUFFIX)
+        ]
+    for eid in sorted(candidates, key=len):
+        state = states.get(eid)
+        options = (state.attributes.get("options") if state else None) or []
+        if SELECT_HEAT_RECOVERY in options:
+            return eid
+    return None
+
+
+def airflow_select_option(semantic: str, options: Iterable[str]) -> Optional[str]:
+    """Map a zone airflow semantic onto one of the select's options."""
+    options = list(options or [])
+    if semantic == AIRFLOW_EXTRACT:
+        for option in SELECT_EXTRACT_OPTIONS:
+            if option in options:
+                return option
+        return None
+    if semantic == AIRFLOW_SUPPLY:
+        return SELECT_SUPPLY_OPTION if SELECT_SUPPLY_OPTION in options else None
+    return SELECT_HEAT_RECOVERY if SELECT_HEAT_RECOVERY in options else None
+
+
 def build_zone_airflow_plans(
     hass: Any,
     outputs: Iterable[str],

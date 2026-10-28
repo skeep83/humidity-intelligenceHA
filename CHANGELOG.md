@@ -23,6 +23,15 @@ This project follows a practical changelog format for Home Assistant and HACS us
   between its normal and boost level every minute.
 - Night soft extraction stays capped at 33 %, or at the zone's own level when that is
   quieter.
+- Zone airflow now works on EcoVent/Blauberg units (`ecovent_v2`), which have no siku
+  `device_type` and previously had airflow commands suppressed. A zone with
+  `airflow_mode` exhaust/supply drives the unit's airflow select (`ventilation` or
+  `extract` for exhaust, `air_supply` for supply), but only in the daytime zone lane and
+  only while the zone's air holds at least 1.5 g/m3 more water than the outdoor air
+  (held 10 min; released at 0.5 g/m3 after 30 min; per-zone `airflow_excess_on` /
+  `airflow_excess_off`). Night soft extraction, idle zones, gates, AQ runs and a missing
+  outdoor reference all hand the unit back to `heat_recovery`. Manual override sends no
+  airflow change. Siku units keep their existing direction control.
 
 <a id="unreleased--v210"></a>
 

@@ -18,7 +18,9 @@ from ..helpers.air_quality import capture_configured_aq_evidence
 from ..helpers.airflow import (
     AIRFLOW_EXTRACT,
     AIRFLOW_NONE,
+    airflow_select_option,
     detect_device_type,
+    find_airflow_select,
     resolve_output_airflow,
     zone_airflow_semantic,
 )
@@ -218,6 +220,9 @@ class HIAutomationEngine:
         )
         # Absolute-humidity hysteresis bookkeeping: zone_key -> {"on_since", "off_since", "active"}
         self._absolute_humidity_state: Dict[str, Dict[str, Any]] = {}
+        # Zone outputs whose airflow select a zone lane drove in this evaluation;
+        # every other airflow-zone output is handed back to heat recovery.
+        self._airflow_select_driven: set[str] = set()
         configured_interval = None
         if entry.options:
             configured_interval = entry.options.get("engine_interval_minutes")
@@ -348,6 +353,7 @@ class HIAutomationEngine:
 
     async def _evaluate(self) -> None:
         try:
+            self._airflow_select_driven = set()
             try:
                 self._record_stability_aq_truth()
             except Exception:
@@ -457,7 +463,7 @@ class HIAutomationEngine:
                             else FAN_NIGHT_SOFT_LEVEL
                         )
                         capped[entity_id] = capped_demand
-                    await self._apply_zone_demands(list(capped.values()), capped)
+                    await self._apply_zone_demands(list(capped.values()), capped, night=True)
                     await self._set_zone_outputs_auto(exclude=list(capped.keys()))
                     first = night_demands[0]
                     await self._set_runtime_mode(
@@ -1344,12 +1350,16 @@ class HIAutomationEngine:
         self,
         demands: List[Dict[str, Any]],
         winner_by_output: Dict[str, Dict[str, Any]],
+        *,
+        night: bool = False,
     ) -> None:
         active_targets: Dict[str, str] = {}
         for entity_id, demand in winner_by_output.items():
             await self._set_fan_outputs_level([entity_id], demand["run_level"])
             airflow = demand.get("airflow") or AIRFLOW_NONE
             if airflow != AIRFLOW_NONE and entity_id.startswith("fan."):
+                if await self._apply_airflow_select(entity_id, airflow, demand, night=night):
+                    continue
                 direction = await self._apply_output_direction(
                     entity_id,
                     airflow,
@@ -1359,6 +1369,147 @@ class HIAutomationEngine:
                     active_targets[entity_id] = direction
         self._airflow_targets = active_targets
         self._sync_airflow_reassert_timer()
+
+    def _airflow_select_for(
+        self, entity_id: str, overrides: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> Optional[str]:
+        """Airflow select used instead of fan direction, or None.
+
+        Only for outputs without a siku device type or a configured direction
+        override, so siku units keep their existing direction control.
+        """
+        override = (overrides or {}).get(entity_id) or {}
+        if str(override.get("supply_direction") or "").strip().lower() in ("forward", "reverse"):
+            return None
+        if detect_device_type(self.hass, entity_id) is not None:
+            return None
+        return find_airflow_select(self.hass, entity_id)
+
+    async def _apply_airflow_select(
+        self,
+        entity_id: str,
+        semantic: str,
+        demand: Dict[str, Any],
+        *,
+        night: bool,
+    ) -> bool:
+        """Drive the airflow select of a zone output. Returns False when the
+        output has no such select and fan direction should be used instead.
+
+        One-way airflow is selected only in the daytime lane and only while the
+        zone's air holds more water than the outdoor air (otherwise one-way
+        flow imports moisture and throws away recovered heat). Everything else
+        - night soft extraction, no drying window - keeps heat recovery.
+        """
+        select_entity = self._airflow_select_for(entity_id, demand.get("airflow_overrides"))
+        if select_entity is None:
+            return False
+        self._airflow_select_driven.add(entity_id)
+        zone_key = str(demand.get("zone_key") or "")
+        zone = self.zones.get(zone_key, {}) if zone_key else {}
+        one_way = not night and self._zone_drying_window(zone, zone_key)
+        await self._set_airflow_select(
+            select_entity, semantic if one_way else AIRFLOW_NONE
+        )
+        return True
+
+    async def _set_airflow_select(self, select_entity: str, semantic: str) -> None:
+        if self._fan_outputs_isolated() or self._manual_override_active():
+            return
+        state = self.hass.states.get(select_entity)
+        if state is None or state.state in {"unavailable", "unknown"}:
+            return
+        option = airflow_select_option(semantic, state.attributes.get("options") or [])
+        if option is None or state.state == option:
+            return
+        if not self.hass.services.has_service("select", "select_option"):
+            return
+        try:
+            await self.hass.services.async_call(
+                "select",
+                "select_option",
+                {"entity_id": select_entity, "option": option},
+                blocking=False,
+            )
+        except Exception:
+            _LOGGER.exception("Failed to set airflow %s on %s", option, select_entity)
+
+    async def _restore_airflow_selects(self) -> None:
+        """Hand zone outputs that no zone lane drives this cycle back to heat recovery.
+
+        Covers every output of an enabled zone that configures an airflow mode,
+        whoever left it one-way (HI before a restart, a manual change, an AQ run
+        that followed a zone lane), so a unit can never stay in extraction once
+        the lane is over.
+        """
+        excluded = set(self._airflow_select_driven)
+        for zone_key, zone in (self.zones or {}).items():
+            if not zone.get("enabled") or zone_airflow_semantic(zone) == AIRFLOW_NONE:
+                continue
+            outputs = [
+                str(e or "").strip()
+                for e in zone.get("outputs", []) or []
+                if str(e or "").strip().startswith("fan.") and str(e).strip() not in excluded
+            ]
+            if not outputs:
+                continue
+            self._absolute_humidity_state.pop(f"airflow_dry::{zone_key}", None)
+            for entity_id in outputs:
+                select_entity = self._airflow_select_for(
+                    entity_id, zone.get("airflow_overrides") or {}
+                )
+                if select_entity:
+                    await self._set_airflow_select(select_entity, AIRFLOW_NONE)
+
+    def _zone_drying_window(self, zone: Dict[str, Any], zone_key: str) -> bool:
+        """True while the zone's air holds clearly more water than outdoor air.
+
+        Same deadband as the moisture_excess trigger: on at >= 1.5 g/m3 held for
+        10 min, off at <= 0.5 g/m3 held for 30 min (per-zone
+        ``airflow_excess_on`` / ``airflow_excess_off``). No outdoor reference means
+        no one-way airflow.
+        """
+        out_temp, out_rh = self._outdoor_conditions()
+        rooms = zone.get("rooms", [])
+        excess = (
+            None
+            if out_temp is None or out_rh is None
+            else psychro_moisture_excess(
+                self._rooms_avg("temperature", rooms),
+                self._rooms_avg("humidity", rooms),
+                out_temp,
+                out_rh,
+            )
+        )
+        state_key = f"airflow_dry::{zone_key or id(zone)}"
+        if excess is None:
+            self._absolute_humidity_state.pop(state_key, None)
+            return False
+        on_threshold = _to_float(zone.get("airflow_excess_on"))
+        if on_threshold is None:
+            on_threshold = MOISTURE_EXCESS_ON_DEFAULT
+        off_threshold = _to_float(zone.get("airflow_excess_off"))
+        if off_threshold is None:
+            off_threshold = MOISTURE_EXCESS_OFF_DEFAULT
+        off_threshold = min(off_threshold, on_threshold)
+        state = self._absolute_humidity_state.setdefault(
+            state_key, {"active": False, "on_since": None, "off_since": None}
+        )
+        now = dt_util.utcnow()
+        if excess >= on_threshold:
+            state["off_since"] = None
+            state["on_since"] = state["on_since"] or now
+            if not state["active"] and (now - state["on_since"]).total_seconds() >= MOISTURE_EXCESS_ON_HOLD_MINUTES * 60:
+                state["active"] = True
+        elif excess <= off_threshold:
+            state["on_since"] = None
+            state["off_since"] = state["off_since"] or now
+            if state["active"] and (now - state["off_since"]).total_seconds() >= MOISTURE_EXCESS_OFF_HOLD_MINUTES * 60:
+                state["active"] = False
+        else:
+            state["on_since"] = None
+            state["off_since"] = None
+        return bool(state["active"])
 
     async def _apply_output_direction(
         self,
@@ -5156,6 +5307,7 @@ class HIAutomationEngine:
             excluded = set(exclude)
             outputs = [entity_id for entity_id in outputs if entity_id not in excluded]
         await self._set_fan_outputs_auto(outputs)
+        await self._restore_airflow_selects()
 
     def _active_aq_outputs(self) -> List[str]:
         outputs: List[str] = []
