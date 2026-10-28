@@ -21,6 +21,7 @@ house 23.3 degC / 66 % -> excess ~ +7.0 g/m3.
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import copy
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -198,9 +199,13 @@ def test_other_triggers_still_work_alongside():
 
 
 def _mould_zone(**overrides):
+    # Holds off: these tests check the physics of a single reading. The hold
+    # behaviour has its own tests below.
     zone = _zone(
         triggers=["surface_mould_risk"],
         thresholds={"surface_mould_risk": 80},
+        surface_on_hold_minutes=0,
+        surface_off_hold_minutes=0,
     )
     zone.update(overrides)
     return zone
@@ -279,3 +284,129 @@ def test_outdoor_rows_never_enter_house_averages():
     # Outdoor 7.3 degC / 86 % would visibly drag both if it were counted.
     assert house_temp is not None and house_temp > 15.0
     assert house_rh is not None and house_rh < 70.0
+
+
+# --------------------------------------------------------------------------
+# surface_mould_risk hold / hysteresis
+# --------------------------------------------------------------------------
+#
+# Room sensors that report in 5 % steps make the derived surface RH jump across
+# the criterion: at 23 degC inside, 13 degC outside and f_Rsi 0.70 a room flipping
+# 65 <-> 70 % reads ~78 <-> ~84 % at the surface. Without a hold the zone flipped
+# between its normal and boost level on every reading.
+
+FLAP_LOW_RH = 65   # ~78 % at the surface: inside the 77..80 band
+FLAP_HIGH_RH = 70  # ~84 % at the surface: above the 80 % criterion
+
+
+def _held_mould_zone(**overrides):
+    zone = _zone(
+        triggers=["surface_mould_risk"],
+        thresholds={"surface_mould_risk": 80},
+        f_rsi=0.70,
+        surface_on_hold_minutes=10,
+        surface_off_hold_minutes=45,
+        surface_hysteresis=3,
+    )
+    zone.update(overrides)
+    return zone
+
+
+def _set_room_rh(engine, rh):
+    engine.hass.states._values["sensor.hi_fixture_kitchen_humidity"].state = str(rh)
+
+
+def _surface(engine, zone):
+    matched, measured, _limit = engine._evaluate_surface_mould_risk(
+        zone, 80, zone_key="zone1"
+    )
+    return matched, measured
+
+
+def _shift(engine, key, minutes):
+    state = engine._absolute_humidity_state["surface::zone1"]
+    state[key] = state[key] - _dt.timedelta(minutes=minutes)
+
+
+def test_surface_hold_blocks_instant_trigger():
+    zone = _held_mould_zone()
+    engine = _engine(
+        _config({"zone1": zone}, **_outdoor_config()),
+        _states(23.0, FLAP_HIGH_RH, outdoor_t=13.0, outdoor_rh=95),
+    )
+    try:
+        matched, measured = _surface(engine, zone)
+        assert measured is not None and measured > 80
+        assert matched is False
+        _shift(engine, "on_since", 11)
+        matched, _ = _surface(engine, zone)
+        assert matched is True
+    finally:
+        asyncio.run(engine.async_stop())
+
+
+def test_surface_reading_hovering_at_criterion_still_engages():
+    """78 % (in band) between 84 % readings must not restart the on-timer."""
+    zone = _held_mould_zone()
+    engine = _engine(
+        _config({"zone1": zone}, **_outdoor_config()),
+        _states(23.0, FLAP_HIGH_RH, outdoor_t=13.0, outdoor_rh=95),
+    )
+    try:
+        assert _surface(engine, zone)[0] is False
+        _set_room_rh(engine, FLAP_LOW_RH)
+        low_matched, low_measured = _surface(engine, zone)
+        assert 77 < low_measured < 80 and low_matched is False
+        assert engine._absolute_humidity_state["surface::zone1"]["on_since"] is not None
+        _shift(engine, "on_since", 11)
+        _set_room_rh(engine, FLAP_HIGH_RH)
+        assert _surface(engine, zone)[0] is True
+    finally:
+        asyncio.run(engine.async_stop())
+
+
+def test_active_surface_trigger_survives_flapping_room_sensor():
+    zone = _held_mould_zone(surface_on_hold_minutes=0)
+    engine = _engine(
+        _config({"zone1": zone}, **_outdoor_config()),
+        _states(23.0, FLAP_HIGH_RH, outdoor_t=13.0, outdoor_rh=95),
+    )
+    try:
+        assert _surface(engine, zone)[0] is True
+        for rh in (FLAP_LOW_RH, FLAP_HIGH_RH, FLAP_LOW_RH, FLAP_HIGH_RH, FLAP_LOW_RH):
+            _set_room_rh(engine, rh)
+            assert _surface(engine, zone)[0] is True, rh
+        assert engine._absolute_humidity_state["surface::zone1"]["off_since"] is None
+    finally:
+        asyncio.run(engine.async_stop())
+
+
+def test_surface_trigger_releases_only_after_off_hold_below_band():
+    zone = _held_mould_zone(surface_on_hold_minutes=0)
+    engine = _engine(
+        _config({"zone1": zone}, **_outdoor_config()),
+        _states(23.0, FLAP_HIGH_RH, outdoor_t=13.0, outdoor_rh=95),
+    )
+    try:
+        assert _surface(engine, zone)[0] is True
+        _set_room_rh(engine, 58)  # ~70 % at the surface: below the band
+        assert _surface(engine, zone)[0] is True
+        assert engine._absolute_humidity_state["surface::zone1"]["off_since"] is not None
+        _shift(engine, "off_since", 46)
+        assert _surface(engine, zone)[0] is False
+    finally:
+        asyncio.run(engine.async_stop())
+
+
+def test_surface_hold_is_tracked_per_zone():
+    zone = _held_mould_zone(surface_on_hold_minutes=0)
+    engine = _engine(
+        _config({"zone1": zone}, **_outdoor_config()),
+        _states(23.0, FLAP_HIGH_RH, outdoor_t=13.0, outdoor_rh=95),
+    )
+    try:
+        engine._evaluate_surface_mould_risk(zone, 80, zone_key="zone1")
+        engine._evaluate_surface_mould_risk(zone, 80, zone_key="zone2")
+        assert {"surface::zone1", "surface::zone2"} <= set(engine._absolute_humidity_state)
+    finally:
+        asyncio.run(engine.async_stop())

@@ -194,7 +194,18 @@ ZONE_OUTPUT_LEVEL_STEP = 5
 ZONE_OUTPUT_LEVEL_DEFAULT = 66
 ZONE_OUTPUT_LEVEL_BOOST_DEFAULT = 100
 FAN_OUTPUT_LEVEL_AUTO = "auto"
-FAN_OUTPUT_LEVEL_STEPS = [33, 66, 100]
+# Selectable fan levels (fork feature). Upstream only offered 33/66/100, which
+# forces a bedroom unit straight from quiet to loud. 33 and 66 stay so existing
+# zones keep their exact speeds; 35 and 65 are left out because they would sit
+# inside FAN_PERCENTAGE_TOLERANCE of 33/66 and never be sent.
+FAN_OUTPUT_LEVEL_STEPS = [30, 33, 40, 45, 50, 55, 60, 66, 70, 75, 80, 85, 90, 95, 100]
+# Night soft extraction never runs louder than this (upstream's lowest step).
+FAN_NIGHT_SOFT_LEVEL = 33
+# Fans that expose preset modes but no "auto" one (EcoVent/Blauberg via the
+# ecovent_v2 integration) cannot be handed back to automatic behaviour; asking
+# for preset "auto" raises NotValidPresetModeError and the unit keeps whatever
+# speed HI last sent. Such outputs are returned to this quiet level instead.
+FAN_IDLE_FALLBACK_LEVEL = 33
 
 # Airflow direction control (fork feature)
 AIRFLOW_MODE_OPTIONS = ["none", "supply", "exhaust"]
@@ -220,6 +231,17 @@ FAN_PERCENTAGE_TOLERANCE = 2
 HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS = 5.0
 HUMIDITY_ABSOLUTE_ON_HOLD_MINUTES = 20
 HUMIDITY_ABSOLUTE_OFF_HOLD_MINUTES = 45
+
+# Surface-mould trigger hysteresis (fork feature). The surface RH is derived from
+# room RH, and room sensors that report in 5 % steps make it jump several points
+# per reading (e.g. 78 <-> 84 % around an 80 % criterion), which flipped the zone
+# between normal and boost every minute. Engages after ON_HOLD minutes at/above
+# the criterion and clears after OFF_HOLD minutes at/below (criterion -
+# hysteresis). Readings inside the band keep the on-timer running and reset the
+# off-timer, so a value hovering at the criterion counts as at the criterion.
+SURFACE_MOULD_HYSTERESIS_POINTS = 3.0
+SURFACE_MOULD_ON_HOLD_MINUTES = 10
+SURFACE_MOULD_OFF_HOLD_MINUTES = 45
 
 # Outdoor reference sensors (fork feature). Deliberately NOT part of the room
 # telemetry list: telemetry rows are keyed by room/level and are averaged into
