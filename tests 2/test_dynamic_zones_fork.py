@@ -584,3 +584,122 @@ def test_third_zone_pressure_is_represented_in_runtime_copy():
         result.runtime_reason,
         result.reason_sensor_state,
     )
+
+
+# ---------------------------------------------------------------------------
+# Finer fan levels (40 % bedroom boost) and idle fallback for fans without an
+# "auto" preset (EcoVent/Blauberg via ecovent_v2)
+# ---------------------------------------------------------------------------
+
+ECOVENT_PRESETS = ["off", "low", "medium", "high", "manual"]
+
+
+def _ecovent_fan(percentage: int, state: str = "on") -> _FakeState:
+    return _FakeState(
+        state,
+        {"percentage": percentage, "preset_mode": "manual", "preset_modes": list(ECOVENT_PRESETS)},
+    )
+
+
+def test_forty_percent_level_is_sent_as_forty():
+    """40 % used to snap to 33 % silently; it must reach the fan as 40."""
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"], output_level=40)})
+    fan_calls, _engine = _run_engine(config, {"fan.hi_fixture_zone3": _ecovent_fan(33)})
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == [
+        ("fan", "set_percentage", {"entity_id": "fan.hi_fixture_zone3", "percentage": 40}, False)
+    ], fan_calls
+
+
+def test_existing_33_and_66_levels_are_unchanged():
+    engine_mod, _core = _load_runtime_modules()
+    assert engine_mod._normalize_fan_level(33, 66) == "33"
+    assert engine_mod._normalize_fan_level("66%", 66) == "66"
+    assert engine_mod._normalize_fan_level(100, 66) == "100"
+    assert engine_mod._normalize_fan_level(0, 66) == "auto"
+    assert engine_mod._normalize_fan_level(41, 66) == "40"
+    assert engine_mod._coerce_fan_percentage(40) == 40
+    assert engine_mod._coerce_fan_percentage(34) == 33
+
+
+def test_idle_fan_without_auto_preset_returns_to_idle_level():
+    """No zone demand: an EcoVent left at 66 % goes back to 33 % instead of a
+    rejected set_preset_mode("auto") that leaves it at 66 %."""
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
+    fan_calls, _engine = _run_engine(
+        config, {"fan.hi_fixture_zone3": _ecovent_fan(66)}, humidity=40
+    )
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_preset_mode") == []
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == [
+        ("fan", "set_percentage", {"entity_id": "fan.hi_fixture_zone3", "percentage": 33}, False)
+    ], fan_calls
+
+
+def test_idle_fallback_is_not_resent_when_already_idle():
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
+    fan_calls, _engine = _run_engine(
+        config, {"fan.hi_fixture_zone3": _ecovent_fan(32)}, humidity=40
+    )
+    assert fan_calls == [], fan_calls
+
+
+def test_idle_fallback_never_switches_a_stopped_fan_on():
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
+    fan_calls, _engine = _run_engine(
+        config, {"fan.hi_fixture_zone3": _ecovent_fan(0, state="off")}, humidity=40
+    )
+    assert fan_calls == [], fan_calls
+
+
+def test_fan_with_auto_preset_still_gets_auto():
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
+    fan_calls, _engine = _run_engine(
+        config,
+        {
+            "fan.hi_fixture_zone3": _FakeState(
+                "on",
+                {"percentage": 66, "preset_mode": "manual", "preset_modes": ["auto", "manual"]},
+            )
+        },
+        humidity=40,
+    )
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_preset_mode") == [
+        ("fan", "set_preset_mode", {"entity_id": "fan.hi_fixture_zone3", "preset_mode": "auto"}, False)
+    ], fan_calls
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == []
+
+
+def test_night_bypass_keeps_a_quieter_zone_level():
+    """A zone already set below the night cap runs at its own level at night."""
+    now_local = _dt.datetime.now().astimezone()
+    start = ((now_local.hour + 6) % 24)
+    end = ((now_local.hour + 12) % 24)
+    config = _config(
+        {
+            "zone3": _zone(
+                outputs=["fan.hi_fixture_zone3"],
+                night_bypass=True,
+                airflow_mode="exhaust",
+                output_level=30,
+            ),
+        },
+        time_gate={
+            "enabled": True,
+            "start": f"{start:02d}:00",
+            "end": f"{end:02d}:00",
+            "outside_action": "safe_state",
+        },
+    )
+    fan_calls, _engine = _run_engine(config, {"fan.hi_fixture_zone3": FAN_OFF})
+    percentages = [c[2]["percentage"] for c in fan_calls if c[1] == "set_percentage"]
+    assert percentages == [30], fan_calls
+
+
+def test_options_flow_offers_forty_percent():
+    import test_config_flow_sanity as cfs
+
+    config_flow = cfs._load_config_flow_module()
+    values = [option["value"] for option in config_flow._fan_output_level_options()]
+    assert values[0] == "auto"
+    assert {"33", "40", "66", "100"} <= set(values)
+    assert config_flow._normalize_fan_level_choice("40", 66) == "40"
+    assert config_flow._normalize_fan_level_choice(33, 66) == "33"

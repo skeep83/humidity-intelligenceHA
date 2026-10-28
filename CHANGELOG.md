@@ -6,6 +6,24 @@ All notable changes to Humidity Intelligence will be documented in this file.
 
 This project follows a practical changelog format for Home Assistant and HACS users. Add new entries under a fresh `Unreleased` section before publishing a future release.
 
+## Unreleased (fork)
+
+- Zone fan levels are no longer limited to 33/66/100 %. The level selectors offer
+  30–100 % (33 and 66 are kept, so existing zones keep their exact speeds), and the
+  engine sends the chosen value instead of snapping it to the nearest of three steps.
+- Fans that publish preset modes without an `auto` preset (for example EcoVent units
+  via `ecovent_v2`) are returned to 33 % when no lane demands them, instead of a
+  rejected `set_preset_mode("auto")` that left them at the last commanded speed and
+  logged an error on every evaluation. A fan that is off is never switched on to idle.
+  Fans that do offer `auto` keep the previous behaviour.
+- `surface_mould_risk` is now held like the absolute-humidity trigger: it engages after
+  10 minutes at/above the criterion and clears after 45 minutes at/below the criterion
+  minus 3 points (per-zone `surface_on_hold_minutes`, `surface_off_hold_minutes`,
+  `surface_hysteresis`). Room sensors that report in 5 % steps no longer flip the zone
+  between its normal and boost level every minute.
+- Night soft extraction stays capped at 33 %, or at the zone's own level when that is
+  quieter.
+
 <a id="unreleased--v210"></a>
 
 ## v2.1.0 — Published Stable (2026-10-12)

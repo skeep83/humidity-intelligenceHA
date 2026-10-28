@@ -34,6 +34,8 @@ from ..const import (
     AIRFLOW_REASSERT_SECONDS_MAX,
     AIRFLOW_REASSERT_SECONDS_MIN,
     AIRFLOW_REASSERT_DEVICE_TYPES,
+    FAN_IDLE_FALLBACK_LEVEL,
+    FAN_NIGHT_SOFT_LEVEL,
     FAN_OUTPUT_LEVEL_AUTO,
     FAN_OUTPUT_LEVEL_STEPS,
     FAN_PERCENTAGE_TOLERANCE,
@@ -48,6 +50,9 @@ from ..const import (
     MOISTURE_EXCESS_OFF_DEFAULT,
     MOISTURE_EXCESS_ON_HOLD_MINUTES,
     MOISTURE_EXCESS_OFF_HOLD_MINUTES,
+    SURFACE_MOULD_HYSTERESIS_POINTS,
+    SURFACE_MOULD_ON_HOLD_MINUTES,
+    SURFACE_MOULD_OFF_HOLD_MINUTES,
     ZONE_F_RSI_DEFAULT,
     ZONE_F_RSI_MIN,
     ZONE_F_RSI_MAX,
@@ -433,9 +438,10 @@ class HIAutomationEngine:
                 if gate_status.kind == "time":
                     # Night soft-extraction bypass: zones explicitly flagged
                     # night_bypass may run when their absolute-humidity
-                    # trigger is active, capped at the lowest fan step. When
-                    # telemetry goes stale the trigger stops matching and the
-                    # outputs fall back to auto (fail to the quiet side).
+                    # trigger is active, capped at FAN_NIGHT_SOFT_LEVEL (or the
+                    # zone's own level when that is quieter). When telemetry goes
+                    # stale the trigger stops matching and the outputs fall back
+                    # to auto (fail to the quiet side).
                     night_demands = await self._collect_zone_demands(
                         night_bypass_only=True
                     )
@@ -444,7 +450,12 @@ class HIAutomationEngine:
                     capped: Dict[str, Dict[str, Any]] = {}
                     for entity_id, demand in winner_by_output.items():
                         capped_demand = dict(demand)
-                        capped_demand["run_level"] = FAN_OUTPUT_LEVEL_STEPS[0]
+                        zone_rank = _fan_level_rank(demand["run_level"])
+                        capped_demand["run_level"] = str(
+                            min(FAN_NIGHT_SOFT_LEVEL, zone_rank)
+                            if zone_rank > 0
+                            else FAN_NIGHT_SOFT_LEVEL
+                        )
                         capped[entity_id] = capped_demand
                     await self._apply_zone_demands(list(capped.values()), capped)
                     await self._set_zone_outputs_auto(exclude=list(capped.keys()))
@@ -1484,7 +1495,7 @@ class HIAutomationEngine:
                     )
             elif trig == "surface_mould_risk":
                 matched, measured, threshold_val = self._evaluate_surface_mould_risk(
-                    zone, threshold
+                    zone, threshold, zone_key=zone_key
                 )
                 if matched and measured is not None:
                     selected_level = _max_fan_level(selected_level, boost_level)
@@ -1762,6 +1773,7 @@ class HIAutomationEngine:
         self,
         zone: Dict[str, Any],
         threshold: Any,
+        zone_key: Optional[str] = None,
     ) -> Tuple[bool, Optional[float], float]:
         """Mould trigger measured where mould actually grows: on the surface.
 
@@ -1769,6 +1781,13 @@ class HIAutomationEngine:
         above the 80 % criterion of ISO 13788 / BS 5250. Because the surface
         temperature follows the outdoor temperature through f_Rsi, this
         threshold slides with the weather instead of being a fixed indoor RH.
+
+        Mould needs days at the criterion, not minutes, so the trigger is held:
+        it engages after ``surface_on_hold_minutes`` at/above the criterion and
+        clears after ``surface_off_hold_minutes`` at/below (criterion -
+        ``surface_hysteresis``). A reading inside the band keeps the on-timer
+        running and resets the off-timer, so coarse room sensors that jump
+        across the criterion cannot flip the zone between normal and boost.
 
         Returns (matched, measured_surface_rh, threshold).
         """
@@ -1788,7 +1807,51 @@ class HIAutomationEngine:
         )
         if surface_rh is None:
             return False, None, limit
-        return surface_rh >= limit, surface_rh, limit
+
+        hysteresis = _to_float(
+            zone.get("surface_hysteresis", SURFACE_MOULD_HYSTERESIS_POINTS)
+        )
+        if hysteresis is None or hysteresis < 0:
+            hysteresis = SURFACE_MOULD_HYSTERESIS_POINTS
+        on_hold = _bounded_int(
+            zone.get("surface_on_hold_minutes", SURFACE_MOULD_ON_HOLD_MINUTES),
+            0,
+            240,
+            SURFACE_MOULD_ON_HOLD_MINUTES,
+        )
+        off_hold = _bounded_int(
+            zone.get("surface_off_hold_minutes", SURFACE_MOULD_OFF_HOLD_MINUTES),
+            0,
+            720,
+            SURFACE_MOULD_OFF_HOLD_MINUTES,
+        )
+        off_threshold = limit - hysteresis
+
+        state_key = f"surface::{zone_key or zone.get('zone_key') or id(zone)}"
+        state = self._absolute_humidity_state.setdefault(
+            state_key, {"active": False, "on_since": None, "off_since": None}
+        )
+        now = dt_util.utcnow()
+
+        if surface_rh > off_threshold:
+            # At/above the criterion, or inside the band: keep counting towards
+            # engagement only while at/above, but never towards release.
+            state["off_since"] = None
+            if not state["active"] and surface_rh >= limit:
+                state["on_since"] = state["on_since"] or now
+            if not state["active"] and state["on_since"] is not None:
+                if (now - state["on_since"]).total_seconds() >= on_hold * 60:
+                    state["active"] = True
+                    state["on_since"] = None
+        else:
+            state["on_since"] = None
+            if state["active"]:
+                state["off_since"] = state["off_since"] or now
+                if (now - state["off_since"]).total_seconds() >= off_hold * 60:
+                    state["active"] = False
+                    state["off_since"] = None
+
+        return bool(state["active"]), surface_rh, limit
 
     async def _handle_aq(self) -> Tuple[bool, List[Dict[str, Any]]]:
         active = False
@@ -5531,6 +5594,9 @@ async def _set_fan_auto(
         domain = entity_id.split(".")[0]
         state = hass.states.get(entity_id)
         if domain == "fan":
+            if _fan_lacks_auto_preset(state):
+                await _set_fan_idle_fallback(hass, entity_id, state)
+                continue
             if not hass.services.has_service("fan", "set_preset_mode"):
                 _LOGGER.debug("Skipping fan auto for %s; set_preset_mode unavailable", entity_id)
                 continue
@@ -5560,6 +5626,46 @@ async def _set_fan_auto(
                 await hass.services.async_call("switch", "turn_off", {"entity_id": entity_id}, blocking=False)
             except Exception:
                 _LOGGER.exception("Failed to turn off switch %s", entity_id)
+
+
+def _fan_lacks_auto_preset(state: Any) -> bool:
+    """True when the fan publishes its preset modes and "auto" is not one."""
+    if state is None:
+        return False
+    modes = state.attributes.get("preset_modes")
+    if not isinstance(modes, (list, tuple)) or not modes:
+        return False
+    return FAN_OUTPUT_LEVEL_AUTO not in {str(mode).strip().lower() for mode in modes}
+
+
+async def _set_fan_idle_fallback(hass: HomeAssistant, entity_id: str, state: Any) -> None:
+    """Return a fan without an "auto" preset to FAN_IDLE_FALLBACK_LEVEL.
+
+    A unit that is off stays off: idling must never switch a fan on.
+    """
+    if state.state != "on":
+        return
+    current_pct = state.attributes.get("percentage")
+    try:
+        if (
+            current_pct is not None
+            and abs(int(current_pct) - FAN_IDLE_FALLBACK_LEVEL) <= FAN_PERCENTAGE_TOLERANCE
+        ):
+            return
+    except (TypeError, ValueError):
+        pass
+    if not hass.services.has_service("fan", "set_percentage"):
+        _LOGGER.debug("Skipping idle fallback for %s; set_percentage unavailable", entity_id)
+        return
+    try:
+        await hass.services.async_call(
+            "fan",
+            "set_percentage",
+            {"entity_id": entity_id, "percentage": FAN_IDLE_FALLBACK_LEVEL},
+            blocking=False,
+        )
+    except Exception:
+        _LOGGER.exception("Failed to return fan %s to its idle level", entity_id)
 
 
 def _bounded_int(value: Any, min_value: int, max_value: int, fallback: int) -> int:
