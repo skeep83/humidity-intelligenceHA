@@ -41,6 +41,11 @@ from ..const import (
     FAN_OUTPUT_LEVEL_AUTO,
     FAN_OUTPUT_LEVEL_STEPS,
     FAN_PERCENTAGE_TOLERANCE,
+    FAN_SPEED_PRESET_HIGH,
+    FAN_SPEED_PRESET_LOW,
+    FAN_SPEED_PRESET_LOW_MAX,
+    FAN_SPEED_PRESET_MEDIUM,
+    FAN_SPEED_PRESET_MEDIUM_MAX,
     CONF_ALERT_HANDLING_ENABLED,
     DEFAULT_ALERT_HANDLING_ENABLED,
     HUMIDITY_ABSOLUTE_HYSTERESIS_POINTS,
@@ -5691,6 +5696,15 @@ async def _set_fan_percentage(
         domain = entity_id.split(".")[0]
         state = hass.states.get(entity_id)
         if domain == "fan":
+            if pct > 0 and _fan_uses_speed_presets(state):
+                await _set_fan_speed_preset(
+                    hass,
+                    entity_id,
+                    state,
+                    _speed_preset_for_level(pct),
+                    should_abort=should_abort,
+                )
+                continue
             if not hass.services.has_service("fan", "turn_on") or not hass.services.has_service("fan", "set_percentage"):
                 _LOGGER.debug("Skipping fan percentage for %s; service unavailable", entity_id)
                 continue
@@ -5793,9 +5807,18 @@ def _fan_lacks_auto_preset(state: Any) -> bool:
 async def _set_fan_idle_fallback(hass: HomeAssistant, entity_id: str, state: Any) -> None:
     """Return a fan without an "auto" preset to FAN_IDLE_FALLBACK_LEVEL.
 
+    Units with speed presets idle at Speed 1 instead of a manual percentage.
     A unit that is off stays off: idling must never switch a fan on.
     """
     if state.state != "on":
+        return
+    if _fan_uses_speed_presets(state):
+        await _set_fan_speed_preset(
+            hass,
+            entity_id,
+            state,
+            _speed_preset_for_level(FAN_IDLE_FALLBACK_LEVEL),
+        )
         return
     current_pct = state.attributes.get("percentage")
     try:
@@ -5818,6 +5841,58 @@ async def _set_fan_idle_fallback(hass: HomeAssistant, entity_id: str, state: Any
         )
     except Exception:
         _LOGGER.exception("Failed to return fan %s to its idle level", entity_id)
+
+
+def _fan_uses_speed_presets(state: Any) -> bool:
+    """True for fans driven by their own speed presets instead of percentages.
+
+    That is a fan that publishes low, medium and high presets and no "auto" one
+    (EcoVent/Blauberg via ecovent_v2).
+    """
+    if state is None or not _fan_lacks_auto_preset(state):
+        return False
+    modes = {str(mode).strip().lower() for mode in state.attributes.get("preset_modes") or []}
+    return {FAN_SPEED_PRESET_LOW, FAN_SPEED_PRESET_MEDIUM, FAN_SPEED_PRESET_HIGH} <= modes
+
+
+def _speed_preset_for_level(pct: int) -> str:
+    if pct <= FAN_SPEED_PRESET_LOW_MAX:
+        return FAN_SPEED_PRESET_LOW
+    if pct <= FAN_SPEED_PRESET_MEDIUM_MAX:
+        return FAN_SPEED_PRESET_MEDIUM
+    return FAN_SPEED_PRESET_HIGH
+
+
+async def _set_fan_speed_preset(
+    hass: HomeAssistant,
+    entity_id: str,
+    state: Any,
+    preset: str,
+    *,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> None:
+    """Run a speed-preset fan at ``preset``; no call when it already runs there."""
+    current = str(state.attributes.get("preset_mode") or "").strip().lower() if state else ""
+    if state and state.state == "on" and current == preset:
+        return
+    if not hass.services.has_service("fan", "set_preset_mode"):
+        _LOGGER.debug("Skipping speed preset for %s; set_preset_mode unavailable", entity_id)
+        return
+    try:
+        if (not state or state.state != "on") and hass.services.has_service("fan", "turn_on"):
+            if should_abort and should_abort():
+                return
+            await hass.services.async_call("fan", "turn_on", {"entity_id": entity_id}, blocking=False)
+        if should_abort and should_abort():
+            return
+        await hass.services.async_call(
+            "fan",
+            "set_preset_mode",
+            {"entity_id": entity_id, "preset_mode": preset},
+            blocking=False,
+        )
+    except Exception:
+        _LOGGER.exception("Failed to set speed preset %s on %s", preset, entity_id)
 
 
 def _bounded_int(value: Any, min_value: int, max_value: int, fallback: int) -> int:

@@ -601,10 +601,15 @@ def _ecovent_fan(percentage: int, state: str = "on") -> _FakeState:
     )
 
 
+def _percentage_fan(percentage: int, state: str = "on") -> _FakeState:
+    """A fan without speed presets: it only understands percentages."""
+    return _FakeState(state, {"percentage": percentage, "preset_mode": None, "preset_modes": ["manual"]})
+
+
 def test_forty_percent_level_is_sent_as_forty():
     """40 % used to snap to 33 % silently; it must reach the fan as 40."""
     config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"], output_level=40)})
-    fan_calls, _engine = _run_engine(config, {"fan.hi_fixture_zone3": _ecovent_fan(33)})
+    fan_calls, _engine = _run_engine(config, {"fan.hi_fixture_zone3": _percentage_fan(33)})
     assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == [
         ("fan", "set_percentage", {"entity_id": "fan.hi_fixture_zone3", "percentage": 40}, False)
     ], fan_calls
@@ -622,11 +627,11 @@ def test_existing_33_and_66_levels_are_unchanged():
 
 
 def test_idle_fan_without_auto_preset_returns_to_idle_level():
-    """No zone demand: an EcoVent left at 66 % goes back to 33 % instead of a
-    rejected set_preset_mode("auto") that leaves it at 66 %."""
+    """No zone demand: a percentage-only fan left at 66 % goes back to 33 %
+    instead of a rejected set_preset_mode("auto") that leaves it at 66 %."""
     config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
     fan_calls, _engine = _run_engine(
-        config, {"fan.hi_fixture_zone3": _ecovent_fan(66)}, humidity=40
+        config, {"fan.hi_fixture_zone3": _percentage_fan(66)}, humidity=40
     )
     assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_preset_mode") == []
     assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == [
@@ -634,10 +639,68 @@ def test_idle_fan_without_auto_preset_returns_to_idle_level():
     ], fan_calls
 
 
+def _speed_preset_fan(preset: str, percentage: int = 22, state: str = "on") -> _FakeState:
+    return _FakeState(
+        state,
+        {"percentage": percentage, "preset_mode": preset, "preset_modes": list(ECOVENT_PRESETS)},
+    )
+
+
+def test_idle_ecovent_returns_to_speed_one_not_manual_percentage():
+    """An idle EcoVent goes back to its own Speed 1 preset. A manual 33 % runs a
+    Breezy unit far louder than Speed 1 and bypasses its supply/exhaust balance."""
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
+    fan_calls, _engine = _run_engine(
+        config, {"fan.hi_fixture_zone3": _ecovent_fan(66)}, humidity=40
+    )
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == [], fan_calls
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_preset_mode") == [
+        ("fan", "set_preset_mode", {"entity_id": "fan.hi_fixture_zone3", "preset_mode": "low"}, False)
+    ], fan_calls
+
+
+def test_idle_ecovent_already_at_speed_one_gets_no_command():
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
+    fan_calls, _engine = _run_engine(
+        config, {"fan.hi_fixture_zone3": _speed_preset_fan("low")}, humidity=40
+    )
+    assert fan_calls == [], fan_calls
+
+
+def test_zone_levels_map_to_ecovent_speed_presets():
+    """33 % runs at Speed 1, 40-66 % at Speed 2, above 66 % at Speed 3."""
+    for level, preset in ((33, "low"), (40, "medium"), (66, "medium"), (100, "high")):
+        config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"], output_level=level)})
+        fan_calls, _engine = _run_engine(config, {"fan.hi_fixture_zone3": _ecovent_fan(10)})
+        assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == [], (level, fan_calls)
+        assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_preset_mode") == [
+            ("fan", "set_preset_mode", {"entity_id": "fan.hi_fixture_zone3", "preset_mode": preset}, False)
+        ], (level, fan_calls)
+
+
+def test_ecovent_already_at_demanded_preset_gets_no_command():
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"], output_level=66)})
+    fan_calls, _engine = _run_engine(config, {"fan.hi_fixture_zone3": _speed_preset_fan("medium", 48)})
+    assert fan_calls == [], fan_calls
+
+
+def test_fan_with_partial_presets_keeps_percentages():
+    """Only fans that publish all of low/medium/high are driven by presets."""
+    config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"], output_level=66)})
+    fan_calls, _engine = _run_engine(
+        config,
+        {"fan.hi_fixture_zone3": _FakeState("on", {"percentage": 10, "preset_mode": "low", "preset_modes": ["off", "low", "manual"]})},
+    )
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_preset_mode") == [], fan_calls
+    assert _calls_to(fan_calls, "fan.hi_fixture_zone3", "set_percentage") == [
+        ("fan", "set_percentage", {"entity_id": "fan.hi_fixture_zone3", "percentage": 66}, False)
+    ], fan_calls
+
+
 def test_idle_fallback_is_not_resent_when_already_idle():
     config = _config({"zone3": _zone(outputs=["fan.hi_fixture_zone3"])})
     fan_calls, _engine = _run_engine(
-        config, {"fan.hi_fixture_zone3": _ecovent_fan(32)}, humidity=40
+        config, {"fan.hi_fixture_zone3": _percentage_fan(32)}, humidity=40
     )
     assert fan_calls == [], fan_calls
 
