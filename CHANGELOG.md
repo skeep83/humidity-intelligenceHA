@@ -16,6 +16,13 @@ This project follows a practical changelog format for Home Assistant and HACS us
   rejected `set_preset_mode("auto")` that left them at the last commanded speed and
   logged an error on every evaluation. A fan that is off is never switched on to idle.
   Fans that do offer `auto` keep the previous behaviour.
+- Fans that publish `low`, `medium` and `high` presets and no `auto` one (EcoVent/Blauberg
+  via `ecovent_v2`) now run on their own speed presets instead of manual percentages:
+  idle and levels up to 33 % use Speed 1 (`low`), up to 66 % Speed 2 (`medium`), above
+  66 % Speed 3 (`high`). A manual percentage bypassed the supply/exhaust balance tuned on
+  the unit and ran Breezy units far louder than Speed 1 (2450 rpm at manual 33 % against
+  1680 rpm at Speed 1). No command is sent while the unit already runs the wanted preset.
+  Fans without all three presets keep percentages.
 - `surface_mould_risk` is now held like the absolute-humidity trigger: it engages after
   10 minutes at/above the criterion and clears after 45 minutes at/below the criterion
   minus 3 points (per-zone `surface_on_hold_minutes`, `surface_off_hold_minutes`,

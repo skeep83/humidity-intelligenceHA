@@ -206,6 +206,19 @@ FAN_NIGHT_SOFT_LEVEL = 33
 # for preset "auto" raises NotValidPresetModeError and the unit keeps whatever
 # speed HI last sent. Such outputs are returned to this quiet level instead.
 FAN_IDLE_FALLBACK_LEVEL = 33
+# Speed presets (fork feature). EcoVent/Blauberg units (ecovent_v2) publish their
+# own speeds as presets low/medium/high (Speed 1/2/3, with the supply/exhaust
+# balance tuned on the unit). A percentage puts them in manual mode instead,
+# which bypasses that tuning and, on Breezy units, runs much louder than Speed 1
+# (measured 2450 rpm at manual 33 % against 1680 rpm at Speed 1). Fans that
+# publish all three presets and no "auto" one get presets instead of
+# percentages: levels up to LOW_MAX run at Speed 1, up to MEDIUM_MAX at Speed 2,
+# anything above at Speed 3. Idling (FAN_IDLE_FALLBACK_LEVEL) is Speed 1.
+FAN_SPEED_PRESET_LOW = "low"
+FAN_SPEED_PRESET_MEDIUM = "medium"
+FAN_SPEED_PRESET_HIGH = "high"
+FAN_SPEED_PRESET_LOW_MAX = 33
+FAN_SPEED_PRESET_MEDIUM_MAX = 66
 
 # Airflow direction control (fork feature)
 AIRFLOW_MODE_OPTIONS = ["none", "supply", "exhaust"]
